@@ -1,4 +1,4 @@
-# 3DGS_Su v0.2.0
+# 3DGS_Su v0.3.0
 
 AviUtl2 で 3DGS（3D Gaussian Splatting）の PLY / SOG をカメラ同期で表示する
 カスタムオブジェクトと、変換用の汎用プラグインです。
@@ -20,6 +20,7 @@ AviUtl2 で 3DGS（3D Gaussian Splatting）の PLY / SOG をカメラ同期で�
 - PLY（binary LE/BE、ASCII）と SOG（zip / 展開フォルダ）に対応
 - 変換プラグインを同梱。追加のソフトは不要
 - カメラ制御に同期した EWA ビルボード
+- 360 度スキャン用のパノラマモード（水平画角を指定）
 - 通常合成 / 加算合成
 
 ## 制限

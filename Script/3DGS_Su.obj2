@@ -1,4 +1,4 @@
---information:3DGS_Su v0.2.0 by Suzuke
+--information:3DGS_Su v0.3.0 by Suzuke
 --label:3D
 --file@src:3DGSファイル(.su3ds)
 --track@size:サイズ,0.01,10,1,0.01
@@ -7,6 +7,8 @@
 --track@limit:表示上限,100,500000,30000,1
 --check@sort:奥から描く,1
 --check@ellipse:楕円,1
+--check@panorama:パノラマ,0
+--track@fov:画角,10,170,75,1
 --check@reload:再読み込み,0
 --select@blend:合成=1,加算=0,通常=1
 
@@ -205,7 +207,11 @@ if cam ~= nil and (mode == 1 or mode == 2) then
 end
 
 local use_ellipse = (ellipse == 1 or ellipse == true)
+local use_panorama = (panorama == 1 or panorama == true)
+local fov_deg = tonumber(fov) or 75
+if fov_deg < 10 then fov_deg = 10 elseif fov_deg > 170 then fov_deg = 170 end
 local need_sort = (sort == 1 or sort == true) and (blend == 1) and (camera ~= nil)
+    and not use_panorama
 local near_clip = tonumber(near) or 10
 if near_clip < 0.01 then near_clip = 0.01 end
 
@@ -219,7 +225,76 @@ local params = {}
 local visible = 0
 local depth_min, depth_max = 1e30, -1e30
 
-if camera ~= nil then
+if camera ~= nil and use_panorama then
+    -- 360 パノラマ用の簡易球面投影。
+    -- カメラ位置からの方向だけを使い、一定距離の平面に並べる。
+    local sw = tonumber(obj.screen_w) or 1280
+    local sh = tonumber(obj.screen_h) or 720
+    if sw < 1 then sw = 1280 end
+    if sh < 1 then sh = 720 end
+    local hfov = math.rad(fov_deg)
+    local half_h = hfov * 0.5
+    local half_v = math.atan(math.tan(half_h) * sh / sw)
+    local plane = 1000
+    local cx, cy, cz = camera.x, camera.y, camera.z
+    local fx, fy, fz = camera.fx, camera.fy, camera.fz
+    local rx, ry, rz = camera.rx, camera.ry, camera.rz
+    local ux, uy, uz = camera.ux, camera.uy, camera.uz
+    for i = 0, limit - 1 do
+        local o = i * 10
+        local bo = i * RECORD
+        local px, py, pz = fp[o], fp[o + 1], fp[o + 2]
+        local dx, dy, dz = px - cx, py - cy, pz - cz
+        local rr = dx * dx + dy * dy + dz * dz
+        if rr > 1e-8 then
+            local inv = 1 / math.sqrt(rr)
+            local xv = (dx * rx + dy * ry + dz * rz) * inv
+            local yv = (dx * ux + dy * uy + dz * uz) * inv
+            local zv = (dx * fx + dy * fy + dz * fz) * inv
+            if zv > 0.05 then
+                local yaw = math.atan2(xv, zv)
+                local pitch = math.asin(yv > 1 and 1 or (yv < -1 and -1 or yv))
+                if math.abs(yaw) <= half_h and math.abs(pitch) <= half_v then
+                    local color_index = bp[bo + 36] + bp[bo + 37] * 256
+                    local alpha_index = bp[bo + 38]
+                    if color_index < PALETTE_N and alpha_index > 0 then
+                        local pxw = cx + fx * plane + rx * (plane * math.tan(yaw))
+                            + ux * (plane * math.tan(pitch))
+                        local pyw = cy + fy * plane + ry * (plane * math.tan(yaw))
+                            + uy * (plane * math.tan(pitch))
+                        local pzw = cz + fz * plane + rz * (plane * math.tan(yaw))
+                            + uz * (plane * math.tan(pitch))
+                        local cxx, cyy, czz = fp[o + 3], fp[o + 6], fp[o + 8]
+                        local trace = (cxx + cyy + czz) / 3
+                        local rad = 3 * math.sqrt(trace > 0 and trace or 0)
+                            * plane * inv * size_scale
+                        if rad < 0.25 then rad = 0.25 end
+                        if rad > 8 then rad = 8 end
+                        local cell = alpha_index * PALETTE_N + color_index
+                        local col = cell % ATLAS_COLS
+                        local row = (cell - col) / ATLAS_COLS
+                        visible = visible + 1
+                        depth[visible] = math.sqrt(rr)
+                        local p = (visible - 1) * 13
+                        params[p + 1] = pxw
+                        params[p + 2] = pyw
+                        params[p + 3] = pzw
+                        params[p + 4] = rx * rad
+                        params[p + 5] = ry * rad
+                        params[p + 6] = rz * rad
+                        params[p + 7] = ux * rad
+                        params[p + 8] = uy * rad
+                        params[p + 9] = uz * rad
+                        params[p + 10] = (col + 0.03) * ATLAS_CELL
+                        params[p + 11] = (row + 0.03) * ATLAS_CELL
+                        params[p + 12] = (col + 0.97) * ATLAS_CELL
+                        params[p + 13] = (row + 0.97) * ATLAS_CELL
+                    end
+                end
+            end
+        end
+    end
+elseif camera ~= nil then
     local cx, cy, cz = camera.x, camera.y, camera.z
     local fx, fy, fz = camera.fx, camera.fy, camera.fz
     local rx, ry, rz = camera.rx, camera.ry, camera.rz

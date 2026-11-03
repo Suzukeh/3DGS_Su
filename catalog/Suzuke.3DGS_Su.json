@@ -6,7 +6,7 @@
   "description": "https://raw.githubusercontent.com/Suzukeh/3DGS_Su/main/README.md",
   "author": "Suzuke",
   "repoURL": "https://github.com/Suzukeh/3DGS_Su",
-  "latest-version": "v0.2.0",
+  "latest-version": "v0.3.0",
   "licenses": [
     {
       "type": "MIT",
@@ -102,12 +102,12 @@
   },
   "version": [
     {
-      "version": "v0.2.0",
-      "release_date": "2026-11-03",
+      "version": "v0.3.0",
+      "release_date": "2026-11-04",
       "file": [
         {
           "path": "{scriptsDir}/3DGS_Su/3DGS_Su.obj2",
-          "XXH3_128": "3c86cbb55b423fd5d0fee7be478f19a7"
+          "XXH3_128": "f0be3caf035ed88b20a2f6ccbad5199d"
         },
         {
           "path": "{scriptsDir}/3DGS_Su/3DGS_Su_atlas.png",

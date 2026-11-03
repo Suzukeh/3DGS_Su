@@ -7,7 +7,7 @@
 
 - ID: `Suzuke.3DGS_Su`
 - リポジトリ: https://github.com/Suzukeh/3DGS_Su
-- リリース: https://github.com/Suzukeh/3DGS_Su/releases/tag/v0.2.0
+- リリース: https://github.com/Suzukeh/3DGS_Su/releases/tag/v0.3.0
 - ライセンス: MIT
 
 ## 同梱物
@@ -20,9 +20,9 @@
 ## 確認事項
 
 - `installer.source.github.pattern` は `^3DGS_Su-v.*\\.zip$`
-- リリース asset `3DGS_Su-v0.2.0.zip` のファイルハッシュを
+- リリース asset `3DGS_Su-v0.3.0.zip` のファイルハッシュを
   `version[].file[].XXH3_128` に設定済み
-- `latest-version` は `v0.2.0`
+- `latest-version` は `v0.3.0`
 - サムネイル: `image/Suzuke.3DGS_Su_thumbnail.png`
 - 説明画像: `image/Suzuke.3DGS_Su_preview.png`
 
