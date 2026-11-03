@@ -6,6 +6,7 @@
   "description": "https://raw.githubusercontent.com/Suzukeh/3DGS_Su/main/README.md",
   "author": "Suzuke",
   "repoURL": "https://github.com/Suzukeh/3DGS_Su",
+  "latest-version": "v0.2.0",
   "licenses": [
     {
       "type": "MIT",
@@ -29,7 +30,10 @@
   "dependencies": [],
   "images": [
     {
-      "thumbnail": "./image/Suzuke.3DGS_Su_thumbnail.png"
+      "thumbnail": "./image/Suzuke.3DGS_Su_thumbnail.png",
+      "infoImg": [
+        "./image/Suzuke.3DGS_Su_preview.png"
+      ]
     }
   ],
   "installer": {

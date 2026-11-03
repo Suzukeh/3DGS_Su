@@ -9,13 +9,14 @@
 1. GitHub リポジトリ `Suzukeh/3DGS_Su` を公開する
 2. `python build_release.py --version v0.2.0` で `dist/3DGS_Su-v0.2.0.zip` を作る
 3. リリース `v0.2.0` を作り、その zip を添付する
-4. サムネイル `catalog/images/thumbnail.png` を用意する（206x206 PNG）
-5. 説明画像 `catalog/images/preview.png` を用意する（16:9 PNG）
+4. サムネイル `catalog/images/Suzuke.3DGS_Su_thumbnail.png` を用意する（206x206 PNG）
+5. 説明画像 `catalog/images/Suzuke.3DGS_Su_preview.png` を用意する（16:9 PNG）
 
 ## データベースへの追加
 
 1. `aviutl2-catalog-data` を fork する
-2. `image/Suzuke.3DGS_Su_thumbnail.png` にサムネイルを置く
+2. `image/Suzuke.3DGS_Su_thumbnail.png` にサムネイル、
+   `image/Suzuke.3DGS_Su_preview.png` に説明画像を置く
 3. `index.json` に `Suzuke.3DGS_Su.json` の内容を追加する
 4. Pull Request を出す
 
