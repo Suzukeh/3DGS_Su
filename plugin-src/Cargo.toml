@@ -1,18 +1,18 @@
 [package]
 name = "three_dgs_converter_su"
-version = "0.2.0"
+version = "0.4.0"
 edition = "2024"
 publish = false
-license = "MIT"
-description = "3DGS (.sog/.ply) to .su3ds converter for AviUtl2"
-repository = "https://github.com/Suzukeh/3DGS_Su"
 
 [lib]
 name = "three_dgs_converter_su"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-aviutl2 = "0.43.0"
+aviutl2 = "=0.43.0"
+aviutl2-eframe = "=0.43.0"
+raw-window-handle = "0.6"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 native-dialog = "0.9.7"
 tracing = "0.1.44"
 serde_json = "1"

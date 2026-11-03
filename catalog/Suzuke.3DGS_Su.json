@@ -6,7 +6,7 @@
   "description": "https://raw.githubusercontent.com/Suzukeh/3DGS_Su/main/README.md",
   "author": "Suzuke",
   "repoURL": "https://github.com/Suzukeh/3DGS_Su",
-  "latest-version": "v0.3.0",
+  "latest-version": "v0.4.0",
   "licenses": [
     {
       "type": "MIT",
@@ -102,7 +102,7 @@
   },
   "version": [
     {
-      "version": "v0.3.0",
+      "version": "v0.4.0",
       "release_date": "2026-11-04",
       "file": [
         {
@@ -115,7 +115,7 @@
         },
         {
           "path": "{pluginsDir}/3DGSConverter_Su/three_dgs_converter_su.aux2",
-          "XXH3_128": "0e2e2a07b064cf98773b6deecb54b2ac"
+          "XXH3_128": "0115340464f4ce87469e041a4e9b6534"
         },
         {
           "path": "{pluginsDir}/3DGSConverter_Su/su3ds.exe",
