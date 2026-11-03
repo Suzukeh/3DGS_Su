@@ -6,3 +6,4 @@
 *.exe binary
 *.aux2 binary
 *.zip binary
+*.py linguist-vendored
