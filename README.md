@@ -100,7 +100,7 @@ AviUtl2 を起動し直すと、カスタムオブジェクトに `3DGS_Su`、
 
 ### 風景: Infinity Octo Art MK
 
-<img src="https://raw.githubusercontent.com/Suzukeh/3DGS_Su/refs/heads/main/docs/infinity-octo.gif" width="640" alt="Infinity Octo Art MK のターンテーブル">
+<img src="https://raw.githubusercontent.com/Suzukeh/3DGS_Su/refs/heads/main/docs/infinity-octo.gif" width="640" alt="Infinity Octo Art MK のパノラマ表示">
 
 “Infinity Octo Art MK ( Wendy Taylor's Octo Art )” by Natural Splats
 （[SuperSplat](https://superspl.at/user/naturalsplats)）
