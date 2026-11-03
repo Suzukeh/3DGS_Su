@@ -4,6 +4,7 @@
 //! 「ファイル選択 → .su3ds 変換 → 選択オブジェクトへ適用」まで完結させる。
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use aviutl2_eframe::{AviUtl2EframeHandle, eframe, egui};
 
@@ -149,6 +150,7 @@ impl ConverterApp {
 
 impl eframe::App for ConverterApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        ui.ctx().request_repaint_after(Duration::from_millis(200));
         egui::ScrollArea::vertical().show(ui, |ui| {
             if let Some(path) = ui
                 .ctx()
