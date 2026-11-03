@@ -49,6 +49,7 @@ def main() -> None:
     shutil.copy2(exe, build / "Plugin" / "3DGSConverter_Su" / "su3ds.exe")
     shutil.copy2(ROOT / "README.md", build / "README.md")
     shutil.copy2(ROOT / "LICENSE", build / "LICENSE")
+    shutil.copy2(ROOT / "THIRD_PARTY_LICENSES.md", build / "THIRD_PARTY_LICENSES.md")
 
     DIST.mkdir(exist_ok=True)
     zip_path = DIST / f"3DGS_Su-{version}.zip"
