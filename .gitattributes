@@ -1,5 +1,8 @@
 *.obj2 text eol=crlf
 *.png binary
+*.gif binary
+*.mp4 binary
+*.webp binary
 *.exe binary
 *.aux2 binary
 *.zip binary

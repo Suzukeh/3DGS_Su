@@ -18,9 +18,9 @@ AviUtl2 で 3DGS（3D Gaussian Splatting）の PLY / SOG をカメラ同期で�
 ## 主な内容
 
 - PLY（binary LE/BE、ASCII）と SOG（zip / 展開フォルダ）に対応
-- Rust 内蔵の変換。Python 不要
-- 30,000 点・640x360 で 23〜30ms（実測）
+- 変換プラグインを同梱。追加のソフトは不要
 - カメラ制御に同期した EWA ビルボード
+- 通常合成 / 加算合成
 
 ## 制限
 
@@ -30,4 +30,4 @@ AviUtl2 で 3DGS（3D Gaussian Splatting）の PLY / SOG をカメラ同期で�
 
 ## ライセンス
 
-MIT。スクリーンショットの素材は Homemade Crystal II by Eric Cornwell (CC BY 4.0) です。
+MIT。作例の Vanadinite（Yann de Couëssin）と Infinity Octo Art MK（Natural Splats）は CC BY 4.0 です。

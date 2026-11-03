@@ -21,7 +21,11 @@ Transitive dependency licenses are listed by `cargo metadata` and are included
 in the source distribution of each crate. The `Cargo.lock` file pins the exact
 versions used for the release.
 
-The screenshot in `catalog/images/` uses **Homemade Crystal II** by Eric
-Cornwell (https://superspl.at/scene/4a84511f), licensed under CC BY 4.0
-(https://creativecommons.org/licenses/by/4.0/). The model itself is not
-included in this repository.
+The sample media in `docs/` and `catalog/images/` use the following CC BY 4.0
+scenes. The model data itself is not included in this repository.
+
+- **Vanadinite** by Yann de Couëssin (https://superspl.at/scene/663d6a97),
+  licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+- **Infinity Octo Art MK ( Wendy Taylor's Octo Art )** by Natural Splats
+  (https://superspl.at/scene/94b17a0d), licensed under CC BY 4.0
+  (https://creativecommons.org/licenses/by/4.0/).
