@@ -24,8 +24,9 @@ versions used for the release.
 The sample media in `docs/` and `catalog/images/` use the following CC BY 4.0
 scenes. The model data itself is not included in this repository.
 
-- **Vanadinite** by Yann de Couëssin (https://superspl.at/scene/663d6a97),
+- **Vanadinite** by Yann de Couëssin
+  (https://superspl.at/user/doudoid, scene: https://superspl.at/scene/663d6a97),
   licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
 - **Infinity Octo Art MK ( Wendy Taylor's Octo Art )** by Natural Splats
-  (https://superspl.at/scene/94b17a0d), licensed under CC BY 4.0
-  (https://creativecommons.org/licenses/by/4.0/).
+  (https://superspl.at/user/naturalsplats, scene: https://superspl.at/scene/94b17a0d),
+  licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).

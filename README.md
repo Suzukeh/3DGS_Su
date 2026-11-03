@@ -5,7 +5,8 @@
 
 <img src="https://raw.githubusercontent.com/Suzukeh/3DGS_Su/refs/heads/main/docs/vanadinite.gif" width="720" alt="Vanadinite のターンテーブル">
 
-> 作例: “Vanadinite” by Yann de Couëssin（[SuperSplat](https://superspl.at/scene/663d6a97)） / CC BY 4.0
+> 作例: “Vanadinite” by Yann de Couëssin（[SuperSplat](https://superspl.at/user/doudoid)）
+> / Source: [scene/663d6a97](https://superspl.at/scene/663d6a97) / CC BY 4.0
 
 ## 特長
 
@@ -91,14 +92,16 @@ AviUtl2 を起動し直すと、カスタムオブジェクトに `3DGS_Su`、
 
 <img src="https://raw.githubusercontent.com/Suzukeh/3DGS_Su/refs/heads/main/docs/vanadinite.gif" width="640" alt="Vanadinite のターンテーブル">
 
-“Vanadinite” by Yann de Couëssin（[SuperSplat](https://superspl.at/scene/663d6a97)） / CC BY 4.0
+“Vanadinite” by Yann de Couëssin（[SuperSplat](https://superspl.at/user/doudoid)）
+/ Source: [scene/663d6a97](https://superspl.at/scene/663d6a97) / CC BY 4.0
 
 ### 風景: Infinity Octo Art MK
 
 <img src="https://raw.githubusercontent.com/Suzukeh/3DGS_Su/refs/heads/main/docs/infinity-octo.gif" width="640" alt="Infinity Octo Art MK のターンテーブル">
 
 “Infinity Octo Art MK ( Wendy Taylor's Octo Art )” by Natural Splats
-（[SuperSplat](https://superspl.at/scene/94b17a0d)） / CC BY 4.0
+（[SuperSplat](https://superspl.at/user/naturalsplats)）
+/ Source: [scene/94b17a0d](https://superspl.at/scene/94b17a0d) / CC BY 4.0
 
 ## 注意
 
