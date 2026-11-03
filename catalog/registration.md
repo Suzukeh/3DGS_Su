@@ -12,6 +12,9 @@
 4. サムネイル `catalog/images/Suzuke.3DGS_Su_thumbnail.png` を用意する（206x206 PNG）
 5. 説明画像 `catalog/images/Suzuke.3DGS_Su_preview.png` を用意する（16:9 PNG）
 
+カタログの画像欄は静止画（サムネイル 206x206、説明画像 16:9）のみです。
+ターンテーブル動画は `docs/` に置き、README で参照します。
+
 ## データベースへの追加
 
 1. `aviutl2-catalog-data` を fork する
