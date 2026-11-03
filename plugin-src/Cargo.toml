@@ -1,0 +1,25 @@
+[package]
+name = "three_dgs_converter_su"
+version = "0.2.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "3DGS (.sog/.ply) to .su3ds converter for AviUtl2"
+repository = "https://github.com/Suzukeh/3DGS_Su"
+
+[lib]
+name = "three_dgs_converter_su"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aviutl2 = "0.43.0"
+native-dialog = "0.9.7"
+tracing = "0.1.44"
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["webp"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

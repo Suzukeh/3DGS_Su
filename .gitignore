@@ -1,0 +1,5 @@
+dist/
+build/
+plugin-src/target/
+__pycache__/
+*.pyc

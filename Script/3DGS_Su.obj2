@@ -1,0 +1,465 @@
+--information:3DGS_Su v0.2.0 by Suzuke
+--label:3D
+--file@src:3DGSファイル(.su3ds)
+--track@size:サイズ,0.01,10,1,0.01
+--track@alpha:不透明度,0,1,1,0.01
+--track@near:手前クリップ,0.1,100000,10,0.1
+--track@limit:表示上限,100,500000,30000,1
+--check@sort:奥から描く,1
+--check@ellipse:楕円,1
+--check@reload:再読み込み,0
+--select@blend:合成=1,加算=0,通常=1
+
+--[[
+3DGS の PLY を tools/3dgs_ply_to_su3ds.py で変換した .su3ds を読み、
+カメラ制御に同期したビルボードとして描く簡易レンダラ。
+
+- 各点の 3x3 共分散を視点回転と透視投影のヤコビアンで 2x2 に落とし、
+  楕円の長軸・短軸と角度を求めて 4 頂点の四角形にする。
+- 色は 512 色、不透明度は 8 段階に量子化済み。1 枚のアトラス画像から
+  UV でセルを選ぶので、点ごとにテクスチャを切り替えずに済む。
+- 通常合成のときだけ奥から手前へ並べ替える。加算合成は順序に依存しない。
+
+カメラ制御の外にあるときは透視投影せず、XY 平面へ正射影する。
+]]
+
+local HEADER = 40
+local RECORD = 40
+local PALETTE_N = 512
+local ATLAS_COLS = 32
+local ATLAS_ROWS = 128
+local ATLAS_CELL = 32
+local MAX_RADIUS = 8192
+
+local function show_error(message)
+    obj.load("text", "3DGS_Su: " .. message)
+    obj.setoption("focus_mode", "fixed_size")
+end
+
+-- UTF-8 のパスも開けるように kernel32 を使う。
+-- （io.open は日本語パスを開けないことがある。@Filters_H.anm2 と同じ経路）
+local function read_all_ffi(file)
+    local ok, data = pcall(function()
+        local ffi = require("ffi")
+        local decls = {
+            "int MultiByteToWideChar(unsigned int CodePage, unsigned long dwFlags, const char * lpMultiByteStr, int cbMultiByte, wchar_t * lpWideCharStr, int cchWideChar);",
+            "void * CreateFileW(const wchar_t * lpFileName, unsigned long dwDesiredAccess, unsigned long dwShareMode, void * lpSecurityAttributes, unsigned long dwCreationDisposition, unsigned long dwFlagsAndAttributes, void * hTemplateFile);",
+            "int GetFileSizeEx(void * hFile, long long * lpFileSize);",
+            "int ReadFile(void * hFile, void * lpBuffer, unsigned long nNumberOfBytesToRead, unsigned long * lpNumberOfBytesRead, void * lpOverlapped);",
+            "int CloseHandle(void * hObject);",
+        }
+        for i = 1, #decls do
+            pcall(ffi.cdef, decls[i])
+        end
+        local k32 = ffi.load("kernel32")
+        local CP_UTF8 = 65001
+        local wlen = k32.MultiByteToWideChar(CP_UTF8, 0, file, -1, nil, 0)
+        if wlen <= 0 then return nil end
+        local wpath = ffi.new("wchar_t[?]", wlen)
+        if k32.MultiByteToWideChar(CP_UTF8, 0, file, -1, wpath, wlen) <= 0 then return nil end
+        -- GENERIC_READ / FILE_SHARE_READ|WRITE / OPEN_EXISTING
+        local handle = k32.CreateFileW(wpath, 0x80000000, 3, nil, 3, 0, nil)
+        if handle == nil or ffi.cast("intptr_t", handle) == -1 then return nil end
+        local size = ffi.new("long long[1]")
+        if k32.GetFileSizeEx(handle, size) == 0 then
+            k32.CloseHandle(handle)
+            return nil
+        end
+        local count = tonumber(size[0])
+        if count <= 0 or count > 512 * 1024 * 1024 then
+            k32.CloseHandle(handle)
+            return nil
+        end
+        local buffer = ffi.new("uint8_t[?]", count)
+        local read = ffi.new("unsigned long[1]")
+        local ok_read = k32.ReadFile(handle, buffer, count, read, nil)
+        k32.CloseHandle(handle)
+        if ok_read == 0 then return nil end
+        return ffi.string(buffer, tonumber(read[0]))
+    end)
+    if ok then return data end
+    return nil
+end
+
+local function read_all(file)
+    if type(io) == "table" and io.open ~= nil then
+        local handle = io.open(file, "rb")
+        if handle ~= nil then
+            local data = handle:read("*a")
+            handle:close()
+            if data ~= nil and #data > 0 then return data end
+        end
+    end
+    return read_all_ffi(file)
+end
+
+local cache = rawget(_G, "__3DGS_Su")
+if cache == nil then
+    cache = {}
+    _G.__3DGS_Su = cache
+end
+
+-- 「再読み込み」を 0 -> 1 にした瞬間だけキャッシュを捨てる
+local reload_state = rawget(_G, "__3DGS_Su_reload")
+if reload_state == nil then
+    reload_state = {}
+    _G.__3DGS_Su_reload = reload_state
+end
+
+local valid_path = type(src) == "string" and #src > 0
+if not valid_path then
+    show_error("ファイルが未指定です")
+    return
+end
+
+-- PLY / SOG を直接選んだ場合は、変換用の bat を案内する
+local lower_src = src:lower()
+if lower_src:match("%.sog$") or lower_src:match("%.ply$") then
+    show_error("3DGS変換.bat にドロップして .su3ds にしてください")
+    return
+end
+
+local reload_now = (reload == 1 or reload == true) and 1 or 0
+if reload_now == 1 and (reload_state[src] or 0) == 0 then
+    cache[src] = nil
+end
+reload_state[src] = reload_now
+
+local entry = cache[src]
+if entry == nil then
+    local data = read_all(src)
+    if type(data) ~= "string" or #data < HEADER then
+        show_error("ファイルを読めません")
+        return
+    end
+    if data:sub(1, 8) ~= "SU3DGS\0\0" then
+        show_error("対応していない形式です")
+        return
+    end
+    local ffi = require("ffi")
+    local base = ffi.cast("const uint8_t*", data)
+    local version = ffi.cast("const uint32_t*", base + 8)[0]
+    local count = ffi.cast("const uint32_t*", base + 12)[0]
+    if version ~= 1 or count == 0 or count > math.floor((#data - HEADER) / RECORD) then
+        show_error("データが壊れています")
+        return
+    end
+    entry = {
+        data = data, -- GC されないよう保持する
+        base = base,
+        count = count,
+    }
+    cache[src] = entry
+end
+
+local count = entry.count
+local limit = math.floor(tonumber(limit) or count)
+if limit < 1 then limit = 1 end
+if limit > count then limit = count end
+
+local size_scale = tonumber(size) or 1
+local master_alpha = tonumber(alpha) or 1
+if master_alpha < 0 then master_alpha = 0 end
+if master_alpha > 1 then master_alpha = 1 end
+if master_alpha <= 0 then
+    obj.clearbuffer("object")
+    return
+end
+
+local camera = nil
+local mode = obj.getoption("camera_mode")
+local cam = obj.getoption("camera_param")
+if cam ~= nil and (mode == 1 or mode == 2) then
+    local fx, fy, fz = cam.tx - cam.x, cam.ty - cam.y, cam.tz - cam.z
+    local length = math.sqrt(fx * fx + fy * fy + fz * fz)
+    if length > 1e-6 then
+        fx, fy, fz = fx / length, fy / length, fz / length
+        local ux, uy, uz = cam.ux, cam.uy, cam.uz
+        local ul = math.sqrt(ux * ux + uy * uy + uz * uz)
+        if ul < 1e-6 then
+            ux, uy, uz, ul = 0, -1, 0, 1
+        end
+        ux, uy, uz = ux / ul, uy / ul, uz / ul
+        -- right = forward x up / screen_up = right x forward
+        local rx = fy * uz - fz * uy
+        local ry = fz * ux - fx * uz
+        local rz = fx * uy - fy * ux
+        local rl = math.sqrt(rx * rx + ry * ry + rz * rz)
+        if rl < 1e-6 then
+            rx, ry, rz, rl = 1, 0, 0, 1
+        end
+        rx, ry, rz = rx / rl, ry / rl, rz / rl
+        local vx = ry * fz - rz * fy
+        local vy = rz * fx - rx * fz
+        local vz = rx * fy - ry * fx
+        local distance = tonumber(cam.d) or 0
+        if distance <= 0 then distance = obj.screen_h end
+        camera = {
+            x = cam.x, y = cam.y, z = cam.z,
+            fx = fx, fy = fy, fz = fz,
+            rx = rx, ry = ry, rz = rz,
+            ux = vx, uy = vy, uz = vz,
+            d = distance,
+        }
+    end
+end
+
+local use_ellipse = (ellipse == 1 or ellipse == true)
+local need_sort = (sort == 1 or sort == true) and (blend == 1) and (camera ~= nil)
+local near_clip = tonumber(near) or 10
+if near_clip < 0.01 then near_clip = 0.01 end
+
+local base = entry.base
+local ffi = require("ffi")
+-- レコードを float / byte の配列として直接見る。点ごとの ffi.cast を避ける。
+local fp = ffi.cast("const float*", base + HEADER)
+local bp = ffi.cast("const uint8_t*", base + HEADER)
+local depth = {}
+local params = {}
+local visible = 0
+local depth_min, depth_max = 1e30, -1e30
+
+if camera ~= nil then
+    local cx, cy, cz = camera.x, camera.y, camera.z
+    local fx, fy, fz = camera.fx, camera.fy, camera.fz
+    local rx, ry, rz = camera.rx, camera.ry, camera.rz
+    local ux, uy, uz = camera.ux, camera.uy, camera.uz
+    local distance = camera.d
+
+    for i = 0, limit - 1 do
+        local o = i * 10
+        local bo = i * RECORD
+        local px, py, pz = fp[o], fp[o + 1], fp[o + 2]
+        local dx, dy, dz = px - cx, py - cy, pz - cz
+        local zv = dx * fx + dy * fy + dz * fz
+        if zv > near_clip then
+            local color_index = bp[bo + 36] + bp[bo + 37] * 256
+            local alpha_index = bp[bo + 38]
+            if color_index < PALETTE_N and alpha_index > 0 then
+                local xv = dx * rx + dy * ry + dz * rz
+                local yv = dx * ux + dy * uy + dz * uz
+
+                local cxx, cxy, cxz = fp[o + 3], fp[o + 4], fp[o + 5]
+                local cyy, cyz, czz = fp[o + 6], fp[o + 7], fp[o + 8]
+
+                -- J * R : (2x3)
+                local jx0 = distance / zv
+                local jx2 = -distance * xv / (zv * zv)
+                local jy1 = distance / zv
+                local jy2 = -distance * yv / (zv * zv)
+                local m00 = jx0 * rx + jx2 * fx
+                local m01 = jx0 * ry + jx2 * fy
+                local m02 = jx0 * rz + jx2 * fz
+                local m10 = jy1 * ux + jy2 * fx
+                local m11 = jy1 * uy + jy2 * fy
+                local m12 = jy1 * uz + jy2 * fz
+
+                -- M * Sigma * M^T
+                local a = m00 * m00 * cxx + m01 * m01 * cyy + m02 * m02 * czz
+                    + 2 * (m00 * m01 * cxy + m00 * m02 * cxz + m01 * m02 * cyz)
+                local b = m00 * m10 * cxx + m01 * m11 * cyy + m02 * m12 * czz
+                    + (m00 * m11 + m01 * m10) * cxy
+                    + (m00 * m12 + m02 * m10) * cxz
+                    + (m01 * m12 + m02 * m11) * cyz
+                local c = m10 * m10 * cxx + m11 * m11 * cyy + m12 * m12 * czz
+                    + 2 * (m10 * m11 * cxy + m10 * m12 * cxz + m11 * m12 * cyz)
+
+                a = a + 0.09
+                c = c + 0.09
+
+                local r1, r2, theta
+                if use_ellipse then
+                    local dif = a - c
+                    local disc = math.sqrt(dif * dif * 0.25 + b * b)
+                    local l1 = (a + c) * 0.5 + disc
+                    local l2 = (a + c) * 0.5 - disc
+                    if l2 < 0.02 then l2 = 0.02 end
+                    theta = 0.5 * math.atan2(2 * b, dif)
+                    r1 = 3 * math.sqrt(l1)
+                    r2 = 3 * math.sqrt(l2)
+                else
+                    local l = (a + c) * 0.5
+                    if l < 0.02 then l = 0.02 end
+                    r1 = 3 * math.sqrt(l)
+                    r2 = r1
+                    theta = 0
+                end
+
+                if r1 > MAX_RADIUS then r1 = MAX_RADIUS end
+                if r2 > MAX_RADIUS then r2 = MAX_RADIUS end
+
+                if r1 >= 0.35 then
+                local world = zv / distance * size_scale
+                local R1, R2 = r1 * world, r2 * world
+                local ct, st = math.cos(theta), math.sin(theta)
+                local a1x = (rx * ct + ux * st) * R1
+                local a1y = (ry * ct + uy * st) * R1
+                local a1z = (rz * ct + uz * st) * R1
+                local a2x = (-rx * st + ux * ct) * R2
+                local a2y = (-ry * st + uy * ct) * R2
+                local a2z = (-rz * st + uz * ct) * R2
+
+                local cell = alpha_index * PALETTE_N + color_index
+                local col = cell % ATLAS_COLS
+                local row = (cell - col) / ATLAS_COLS
+
+                visible = visible + 1
+                depth[visible] = zv
+                if zv < depth_min then depth_min = zv end
+                if zv > depth_max then depth_max = zv end
+                local p = (visible - 1) * 13
+                params[p + 1] = px
+                params[p + 2] = py
+                params[p + 3] = pz
+                params[p + 4] = a1x
+                params[p + 5] = a1y
+                params[p + 6] = a1z
+                params[p + 7] = a2x
+                params[p + 8] = a2y
+                params[p + 9] = a2z
+                params[p + 10] = (col + 0.03) * ATLAS_CELL
+                params[p + 11] = (row + 0.03) * ATLAS_CELL
+                params[p + 12] = (col + 0.97) * ATLAS_CELL
+                params[p + 13] = (row + 0.97) * ATLAS_CELL
+                end
+            end
+        end
+    end
+else
+    -- カメラ制御の外では XY 平面へ正射影する
+    for i = 0, limit - 1 do
+        local o = i * 10
+        local bo = i * RECORD
+        local px, py = fp[o], fp[o + 1]
+        local cxx, cxy = fp[o + 3], fp[o + 4]
+        local cyy = fp[o + 6]
+        local color_index = bp[bo + 36] + bp[bo + 37] * 256
+        local alpha_index = bp[bo + 38]
+        if color_index < PALETTE_N and alpha_index > 0 then
+            local r1, r2, theta
+            if use_ellipse then
+                local dif = cxx - cyy
+                local disc = math.sqrt(dif * dif * 0.25 + cxy * cxy)
+                local l1 = (cxx + cyy) * 0.5 + disc
+                local l2 = (cxx + cyy) * 0.5 - disc
+                if l2 < 0.0001 then l2 = 0.0001 end
+                theta = 0.5 * math.atan2(2 * cxy, dif)
+                r1 = 3 * math.sqrt(l1)
+                r2 = 3 * math.sqrt(l2)
+            else
+                local l = (cxx + cyy) * 0.5
+                if l < 0.0001 then l = 0.0001 end
+                r1 = 3 * math.sqrt(l)
+                r2 = r1
+                theta = 0
+            end
+            if r1 > MAX_RADIUS then r1 = MAX_RADIUS end
+            if r2 > MAX_RADIUS then r2 = MAX_RADIUS end
+            if r1 >= 0.35 then
+            local R1, R2 = r1 * size_scale, r2 * size_scale
+            local ct, st = math.cos(theta), math.sin(theta)
+            local a1x, a1y = ct * R1, st * R1
+            local a2x, a2y = -st * R2, ct * R2
+
+            local cell = alpha_index * PALETTE_N + color_index
+            local col = cell % ATLAS_COLS
+            local row = (cell - col) / ATLAS_COLS
+
+            visible = visible + 1
+            depth[visible] = 0
+            local p = (visible - 1) * 13
+            params[p + 1] = px
+            params[p + 2] = py
+            params[p + 3] = 0
+            params[p + 4] = a1x
+            params[p + 5] = a1y
+            params[p + 6] = 0
+            params[p + 7] = a2x
+            params[p + 8] = a2y
+            params[p + 9] = 0
+            params[p + 10] = (col + 0.03) * ATLAS_CELL
+            params[p + 11] = (row + 0.03) * ATLAS_CELL
+            params[p + 12] = (col + 0.97) * ATLAS_CELL
+            params[p + 13] = (row + 0.97) * ATLAS_CELL
+            end
+        end
+    end
+end
+
+if visible == 0 then
+    obj.clearbuffer("object")
+    return
+end
+
+-- アトラスをオブジェクトの画像にする。パスはスクリプトフォルダーからの相対。
+if not obj.copybuffer("object", "image:3DGS_Su_atlas.png") then
+    show_error("3DGS_Su_atlas.png がありません")
+    return
+end
+
+local order = {}
+if need_sort then
+    -- 比較ソート (table.sort) は 3 万点で約 20ms かかる。
+    -- 深度をバケットに分け、遠いバケットから連結リストをたどる。
+    local BUCKETS = 4096
+    local head = {}
+    local next_index = {}
+    local span = depth_max - depth_min
+    local inv = span > 1e-9 and (BUCKETS - 1) / span or 0
+    for i = 1, visible do
+        local b = math.floor((depth[i] - depth_min) * inv + 0.5)
+        if b < 0 then b = 0 elseif b > BUCKETS - 1 then b = BUCKETS - 1 end
+        next_index[i] = head[b]
+        head[b] = i
+    end
+    local k = 0
+    for b = BUCKETS - 1, 0, -1 do
+        local i = head[b]
+        while i ~= nil do
+            k = k + 1
+            order[k] = i
+            i = next_index[i]
+        end
+    end
+else
+    for i = 1, visible do order[i] = i end
+end
+
+obj.setoption("blend", (blend == 1) and "none" or "add")
+obj.setoption("culling", 0)
+obj.setoption("sampler", "clip")
+obj.setoption("focus_mode", "fixed_size")
+
+-- drawpoly の呼び出し回数を減らす（6000 四角形ずつ）
+local CHUNK = 6000
+local verts = {}
+local n = 0
+
+for k = 1, visible do
+    local i = order[k]
+    local p = (i - 1) * 13
+    local x, y, z = params[p + 1], params[p + 2], params[p + 3]
+    local a1x, a1y, a1z = params[p + 4], params[p + 5], params[p + 6]
+    local a2x, a2y, a2z = params[p + 7], params[p + 8], params[p + 9]
+    local u0, v0 = params[p + 10], params[p + 11]
+    local u1, v1 = params[p + 12], params[p + 13]
+
+    n = n + 1
+    verts[n] = {
+        x - a1x - a2x, y - a1y - a2y, z - a1z - a2z,
+        x + a1x - a2x, y + a1y - a2y, z + a1z - a2z,
+        x + a1x + a2x, y + a1y + a2y, z + a1z + a2z,
+        x - a1x + a2x, y - a1y + a2y, z - a1z + a2z,
+        u0, v0, u1, v0, u1, v1, u0, v1,
+    }
+
+    if n >= CHUNK then
+        obj.drawpoly(verts, master_alpha)
+        verts = {}
+        n = 0
+    end
+end
+
+if n > 0 then
+    obj.drawpoly(verts, master_alpha)
+end

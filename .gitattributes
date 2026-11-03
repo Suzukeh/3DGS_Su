@@ -1,0 +1,5 @@
+*.obj2 text eol=crlf
+*.png binary
+*.exe binary
+*.aux2 binary
+*.zip binary

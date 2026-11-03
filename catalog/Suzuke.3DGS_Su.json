@@ -1,0 +1,123 @@
+{
+  "id": "Suzuke.3DGS_Su",
+  "name": "3DGS_Su",
+  "type": "スクリプト",
+  "summary": "3DGSのPLY/SOGを3D空間にカメラ同期で表示",
+  "description": "https://raw.githubusercontent.com/Suzukeh/3DGS_Su/main/README.md",
+  "author": "Suzuke",
+  "repoURL": "https://github.com/Suzukeh/3DGS_Su",
+  "licenses": [
+    {
+      "type": "MIT",
+      "isCustom": false,
+      "copyrights": [
+        {
+          "years": "2026",
+          "holder": "Suzuke"
+        }
+      ],
+      "licenseBody": null
+    }
+  ],
+  "tags": [
+    "3D",
+    "3DGS",
+    "点群",
+    "ガウシアンスプラッティング",
+    "カメラ制御"
+  ],
+  "dependencies": [],
+  "images": [
+    {
+      "thumbnail": "./image/Suzuke.3DGS_Su_thumbnail.png"
+    }
+  ],
+  "installer": {
+    "source": {
+      "github": {
+        "owner": "Suzukeh",
+        "repo": "3DGS_Su",
+        "pattern": "^3DGS_Su-v.*\\.zip$"
+      }
+    },
+    "install": [
+      {
+        "action": "download"
+      },
+      {
+        "action": "extract"
+      },
+      {
+        "action": "copy",
+        "from": "{tmp}/Script/3DGS_Su.obj2",
+        "to": "{scriptsDir}/3DGS_Su"
+      },
+      {
+        "action": "copy",
+        "from": "{tmp}/Script/3DGS_Su_atlas.png",
+        "to": "{scriptsDir}/3DGS_Su"
+      },
+      {
+        "action": "copy",
+        "from": "{tmp}/Script/README.md",
+        "to": "{scriptsDir}/3DGS_Su"
+      },
+      {
+        "action": "copy",
+        "from": "{tmp}/Plugin/3DGSConverter_Su/three_dgs_converter_su.aux2",
+        "to": "{pluginsDir}/3DGSConverter_Su"
+      },
+      {
+        "action": "copy",
+        "from": "{tmp}/Plugin/3DGSConverter_Su/su3ds.exe",
+        "to": "{pluginsDir}/3DGSConverter_Su"
+      }
+    ],
+    "uninstall": [
+      {
+        "action": "delete",
+        "path": "{scriptsDir}/3DGS_Su/3DGS_Su.obj2"
+      },
+      {
+        "action": "delete",
+        "path": "{scriptsDir}/3DGS_Su/3DGS_Su_atlas.png"
+      },
+      {
+        "action": "delete",
+        "path": "{scriptsDir}/3DGS_Su/README.md"
+      },
+      {
+        "action": "delete",
+        "path": "{pluginsDir}/3DGSConverter_Su/three_dgs_converter_su.aux2"
+      },
+      {
+        "action": "delete",
+        "path": "{pluginsDir}/3DGSConverter_Su/su3ds.exe"
+      }
+    ]
+  },
+  "version": [
+    {
+      "version": "v0.2.0",
+      "release_date": "2026-11-03",
+      "file": [
+        {
+          "path": "{scriptsDir}/3DGS_Su/3DGS_Su.obj2",
+          "XXH3_128": "3c86cbb55b423fd5d0fee7be478f19a7"
+        },
+        {
+          "path": "{scriptsDir}/3DGS_Su/3DGS_Su_atlas.png",
+          "XXH3_128": "2a0e792d9e6819be2c11d14c76b8e29f"
+        },
+        {
+          "path": "{pluginsDir}/3DGSConverter_Su/three_dgs_converter_su.aux2",
+          "XXH3_128": "0e2e2a07b064cf98773b6deecb54b2ac"
+        },
+        {
+          "path": "{pluginsDir}/3DGSConverter_Su/su3ds.exe",
+          "XXH3_128": "84b1b5dffe40ec743352638f5483abc9"
+        }
+      ]
+    }
+  ]
+}
