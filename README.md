@@ -3,7 +3,7 @@
 3DGS（3D Gaussian Splatting）の PLY / SOG を AviUtl2 の 3D 空間に置き、
 カメラ制御に同期して動かすカスタムオブジェクトです。
 
-![3DGS_Su](https://raw.githubusercontent.com/Suzukeh/3DGS_Su/main/catalog/images/Suzuke.3DGS_Su_preview.png)
+![3DGS_Su](https://raw.githubusercontent.com/Suzukeh/3DGS_Su/refs/heads/main/catalog/images/Suzuke.3DGS_Su_preview.png)
 
 > スクリーンショットの素材: **Homemade Crystal II** by Eric Cornwell
 > ([SuperSplat](https://superspl.at/scene/4a84511f)) / CC BY 4.0
