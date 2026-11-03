@@ -103,6 +103,8 @@ AviUtl2 を起動し直すと、カスタムオブジェクトに `3DGS_Su`、
 （[SuperSplat](https://superspl.at/user/naturalsplats)）
 / Source: [scene/94b17a0d](https://superspl.at/scene/94b17a0d) / CC BY 4.0
 
+> 風景例は 2M 点の素材を SuperSplat ビューアで撮影したものです。
+
 ## 注意
 
 - **SH（視点依存の色）は使いません。** PLY / SOG の DC 成分のみです。
