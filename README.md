@@ -27,7 +27,7 @@
 
 ## インストール
 
-AviUtl2 カタログで `3DGS_Su` を検索してインストールしてください。
+AviUtl2 カタログで `3DGS_Su` を検索してインストールしてください（登録準備中）。
 
 手動で入れる場合の配置と、初回起動時の注意は
 [インストール](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/install.md) にまとめています。
