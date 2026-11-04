@@ -30,7 +30,7 @@
 AviUtl2 カタログで `3DGS_Su` を検索してインストールしてください。
 
 手動で入れる場合の配置と、初回起動時の注意は
-[インストール](docs/install.md) にまとめています。
+[インストール](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/install.md) にまとめています。
 
 起動すると `3DGS変換` の専用ウィンドウが開きます。
 カスタムオブジェクトに `3DGS_Su` が追加されます。
@@ -50,21 +50,21 @@ AviUtl2 カタログで `3DGS_Su` を検索してインストールしてくだ�
 またはオブジェクトの右クリックメニューから開き直せます。
 
 UIの詳しい操作、パラメータ、対応形式は
-[使い方](docs/usage.md) を参照してください。
+[使い方](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/usage.md) を参照してください。
 
 ## 作例
 
 Vanadinite と、360度スキャンの Infinity Octo Art MK を掲載しています。
 
-[作例を見る](docs/samples.md)
+[作例を見る](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/samples.md)
 
 ## ドキュメント
 
-- [インストール](docs/install.md)
-- [使い方・パラメータ・対応形式](docs/usage.md)
-- [.su3ds とは](docs/su3ds.md)
-- [注意・制限](docs/notes.md)
-- [作例](docs/samples.md)
+- [インストール](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/install.md)
+- [使い方・パラメータ・対応形式](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/usage.md)
+- [.su3ds とは](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/su3ds.md)
+- [注意・制限](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/notes.md)
+- [作例](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/samples.md)
 
 ## ライセンス
 
