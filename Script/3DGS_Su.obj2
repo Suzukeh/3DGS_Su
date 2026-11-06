@@ -1,19 +1,20 @@
---information:3DGS_Su v0.3.0 by Suzuke
+--information:3DGS_Su v0.5.0 by Suzuke
 --label:3D
 --file@src:3DGSファイル(.su3ds)
 --track@size:サイズ,0.01,10,1,0.01
 --track@alpha:不透明度,0,1,1,0.01
 --track@near:手前クリップ,0.1,100000,10,0.1
---track@limit:表示上限,100,500000,30000,1
+--track@limit:表示上限,0,10000000,30000,1
 --check@sort:奥から描く,1
 --check@ellipse:楕円,1
 --check@panorama:パノラマ,0
 --track@fov:画角,10,170,75,1
 --check@reload:再読み込み,0
+--value@revision:更新番号,0
 --select@blend:合成=1,加算=0,通常=1
 
 --[[
-3DGS の PLY を tools/3dgs_ply_to_su3ds.py で変換した .su3ds を読み、
+3DGS変換UIで作成した .su3ds（軽量v1／品質優先v2）を読み、
 カメラ制御に同期したビルボードとして描く簡易レンダラ。
 
 - 各点の 3x3 共分散を視点回転と透視投影のヤコビアンで 2x2 に落とし、
@@ -25,8 +26,27 @@
 カメラ制御の外にあるときは透視投影せず、XY 平面へ正射影する。
 ]]
 
+--[[pixelshader@quality_atlas:
+cbuffer constant0 : register(b0) {
+    float4 splat_color[256];
+};
+float4 quality_atlas(float4 pos : SV_Position) : SV_Target {
+    uint2 pixel = (uint2)pos.xy;
+    uint2 cell = pixel / 64;
+    uint index = cell.y * 16 + cell.x;
+    float2 q = ((float2)(pixel % 64) + 0.5) / 32.0 - 1.0;
+    float radius2 = dot(q, q);
+    if (radius2 > 1.0) return float4(0, 0, 0, 0);
+    float a = splat_color[index].a * exp(-4.5 * radius2);
+    return float4(splat_color[index].rgb * a, a);
+}
+]]
+
 local HEADER = 40
 local RECORD = 40
+local QUALITY_HEADER = 48
+local QUALITY_RECORD = 232
+local QUALITY_FLOATS = 58
 local PALETTE_N = 512
 local ATLAS_COLS = 32
 local ATLAS_ROWS = 128
@@ -68,7 +88,7 @@ local function read_all_ffi(file)
             return nil
         end
         local count = tonumber(size[0])
-        if count <= 0 or count > 512 * 1024 * 1024 then
+        if count <= 0 or count > 2147483647 then
             k32.CloseHandle(handle)
             return nil
         end
@@ -117,7 +137,7 @@ end
 -- PLY / SOG を直接選んだ場合は、変換用の bat を案内する
 local lower_src = src:lower()
 if lower_src:match("%.sog$") or lower_src:match("%.ply$") then
-    show_error("3DGS変換.bat にドロップして .su3ds にしてください")
+    show_error("「3DGS変換」ウィンドウで変換して適用してください")
     return
 end
 
@@ -127,7 +147,12 @@ if reload_now == 1 and (reload_state[src] or 0) == 0 then
 end
 reload_state[src] = reload_now
 
+local revision_key = tostring(revision or 0)
 local entry = cache[src]
+if entry ~= nil and entry.revision ~= revision_key then
+    cache[src] = nil
+    entry = nil
+end
 if entry == nil then
     local data = read_all(src)
     if type(data) ~= "string" or #data < HEADER then
@@ -142,22 +167,33 @@ if entry == nil then
     local base = ffi.cast("const uint8_t*", data)
     local version = ffi.cast("const uint32_t*", base + 8)[0]
     local count = ffi.cast("const uint32_t*", base + 12)[0]
-    if version ~= 1 or count == 0 or count > math.floor((#data - HEADER) / RECORD) then
+    local quality = version == 2
+    local header_size = quality and QUALITY_HEADER or HEADER
+    local record_size = quality and QUALITY_RECORD or RECORD
+    if (version ~= 1 and version ~= 2) or count == 0
+        or #data < header_size or count > math.floor((#data - header_size) / record_size) then
         show_error("データが壊れています")
         return
     end
+    local flags = quality and ffi.cast("const uint32_t*", base + 44)[0] or 0
     entry = {
         data = data, -- GC されないよう保持する
         base = base,
         count = count,
+        version = version,
+        header_size = header_size,
+        record_size = record_size,
+        flags = flags,
+        revision = revision_key,
     }
     cache[src] = entry
 end
 
+local quality = entry.version == 2
 local count = entry.count
-local limit = math.floor(tonumber(limit) or count)
+local display_limit = math.floor(tonumber(limit) or count)
+local limit = display_limit <= 0 and count or math.min(display_limit, count)
 if limit < 1 then limit = 1 end
-if limit > count then limit = count end
 
 local size_scale = tonumber(size) or 1
 local master_alpha = tonumber(alpha) or 1
@@ -210,16 +246,52 @@ local use_ellipse = (ellipse == 1 or ellipse == true)
 local use_panorama = (panorama == 1 or panorama == true)
 local fov_deg = tonumber(fov) or 75
 if fov_deg < 10 then fov_deg = 10 elseif fov_deg > 170 then fov_deg = 170 end
-local need_sort = (sort == 1 or sort == true) and (blend == 1) and (camera ~= nil)
-    and not use_panorama
+local need_sort = (quality or sort == 1 or sort == true) and (blend == 1) and (camera ~= nil)
+    and (quality or not use_panorama)
 local near_clip = tonumber(near) or 10
 if near_clip < 0.01 then near_clip = 0.01 end
 
-local base = entry.base
+local base = entry.base + entry.header_size
 local ffi = require("ffi")
 -- レコードを float / byte の配列として直接見る。点ごとの ffi.cast を避ける。
-local fp = ffi.cast("const float*", base + HEADER)
-local bp = ffi.cast("const uint8_t*", base + HEADER)
+local fp = ffi.cast("const float*", base)
+local bp = ffi.cast("const uint8_t*", base)
+local record_floats = entry.record_size / 4
+local record_bytes = entry.record_size
+local sh_degree = math.floor(entry.flags / 256) % 4
+local function quality_color(o, px, py, pz)
+    local r, g, b, a = fp[o + 9], fp[o + 10], fp[o + 11], fp[o + 12]
+    if entry.flags % 2 == 0 or sh_degree == 0 then return r, g, b, a end
+    local dx, dy, dz = 0, 0, 1
+    if camera ~= nil then dx, dy, dz = px - camera.x, py - camera.y, pz - camera.z end
+    if math.floor(entry.flags / 2) % 2 == 1 then dy = -dy end
+        if math.floor(entry.flags / 4) % 2 == 1 then dz = -dz end
+    local length = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if length > 1e-9 then dx, dy, dz = dx / length, dy / length, dz / length end
+    local x, y, z = dx, dy, dz
+    local basis = {
+        -0.4886025119 * y, 0.4886025119 * z, -0.4886025119 * x,
+        1.0925484306 * x * y, -1.0925484306 * y * z,
+        0.3153915653 * (2 * z * z - x * x - y * y),
+        -1.0925484306 * x * z, 0.5462742153 * (x * x - y * y),
+        -0.5900435899 * y * (3 * x * x - y * y),
+        2.8906114426 * x * y * z,
+        -0.4570457995 * y * (4 * z * z - x * x - y * y),
+        0.3731763326 * z * (2 * z * z - 3 * x * x - 3 * y * y),
+        -0.4570457995 * x * (4 * z * z - x * x - y * y),
+        1.4453057213 * z * (x * x - y * y),
+        -0.5900435899 * x * (x * x - 3 * y * y),
+    }
+    local colors = { r, g, b }
+    for channel = 0, 2 do
+        local value = colors[channel + 1]
+        for j = 1, sh_degree * (sh_degree + 2) do
+            value = value + fp[o + 13 + channel * 15 + j - 1] * basis[j]
+        end
+        colors[channel + 1] = value > 0 and value or 0
+    end
+    return colors[1], colors[2], colors[3], a
+end
 local depth = {}
 local params = {}
 local visible = 0
@@ -241,8 +313,8 @@ if camera ~= nil and use_panorama then
     local rx, ry, rz = camera.rx, camera.ry, camera.rz
     local ux, uy, uz = camera.ux, camera.uy, camera.uz
     for i = 0, limit - 1 do
-        local o = i * 10
-        local bo = i * RECORD
+        local o = i * record_floats
+        local bo = i * record_bytes
         local px, py, pz = fp[o], fp[o + 1], fp[o + 2]
         local dx, dy, dz = px - cx, py - cy, pz - cz
         local rr = dx * dx + dy * dy + dz * dz
@@ -255,9 +327,15 @@ if camera ~= nil and use_panorama then
                 local yaw = math.atan2(xv, zv)
                 local pitch = math.asin(yv > 1 and 1 or (yv < -1 and -1 or yv))
                 if math.abs(yaw) <= half_h and math.abs(pitch) <= half_v then
-                    local color_index = bp[bo + 36] + bp[bo + 37] * 256
-                    local alpha_index = bp[bo + 38]
-                    if color_index < PALETTE_N and alpha_index > 0 then
+                    local color_index, alpha_index, qr, qg, qb, qa
+                                        if quality then
+                                            color_index, alpha_index = 0, 1
+                                            qr, qg, qb, qa = quality_color(o, px, py, pz)
+                                        else
+                                            color_index = bp[bo + 36] + bp[bo + 37] * 256
+                                            alpha_index = bp[bo + 38]
+                                        end
+                                        if quality or (color_index < PALETTE_N and alpha_index > 0) then
                         local pxw = cx + fx * plane + rx * (plane * math.tan(yaw))
                             + ux * (plane * math.tan(pitch))
                         local pyw = cy + fy * plane + ry * (plane * math.tan(yaw))
@@ -275,7 +353,7 @@ if camera ~= nil and use_panorama then
                         local row = (cell - col) / ATLAS_COLS
                         visible = visible + 1
                         depth[visible] = math.sqrt(rr)
-                        local p = (visible - 1) * 13
+                        local p = (visible - 1) * 17
                         params[p + 1] = pxw
                         params[p + 2] = pyw
                         params[p + 3] = pzw
@@ -289,6 +367,7 @@ if camera ~= nil and use_panorama then
                         params[p + 11] = (row + 0.03) * ATLAS_CELL
                         params[p + 12] = (col + 0.97) * ATLAS_CELL
                         params[p + 13] = (row + 0.97) * ATLAS_CELL
+                        params[p + 14], params[p + 15], params[p + 16], params[p + 17] = qr, qg, qb, qa
                     end
                 end
             end
@@ -302,15 +381,21 @@ elseif camera ~= nil then
     local distance = camera.d
 
     for i = 0, limit - 1 do
-        local o = i * 10
-        local bo = i * RECORD
+        local o = i * record_floats
+        local bo = i * record_bytes
         local px, py, pz = fp[o], fp[o + 1], fp[o + 2]
         local dx, dy, dz = px - cx, py - cy, pz - cz
         local zv = dx * fx + dy * fy + dz * fz
         if zv > near_clip then
-            local color_index = bp[bo + 36] + bp[bo + 37] * 256
-            local alpha_index = bp[bo + 38]
-            if color_index < PALETTE_N and alpha_index > 0 then
+            local color_index, alpha_index, qr, qg, qb, qa
+                                if quality then
+                                    color_index, alpha_index = 0, 1
+                                    qr, qg, qb, qa = quality_color(o, px, py, pz)
+                                else
+                                    color_index = bp[bo + 36] + bp[bo + 37] * 256
+                                    alpha_index = bp[bo + 38]
+                                end
+                                if quality or (color_index < PALETTE_N and alpha_index > 0) then
                 local xv = dx * rx + dy * ry + dz * rz
                 local yv = dx * ux + dy * uy + dz * uz
 
@@ -360,10 +445,12 @@ elseif camera ~= nil then
                     theta = 0
                 end
 
-                if r1 > MAX_RADIUS then r1 = MAX_RADIUS end
-                if r2 > MAX_RADIUS then r2 = MAX_RADIUS end
+                if not quality then
+                    if r1 > MAX_RADIUS then r1 = MAX_RADIUS end
+                    if r2 > MAX_RADIUS then r2 = MAX_RADIUS end
+                end
 
-                if r1 >= 0.35 then
+                if r1 >= 0.35 or quality then
                 local world = zv / distance * size_scale
                 local R1, R2 = r1 * world, r2 * world
                 local ct, st = math.cos(theta), math.sin(theta)
@@ -382,7 +469,7 @@ elseif camera ~= nil then
                 depth[visible] = zv
                 if zv < depth_min then depth_min = zv end
                 if zv > depth_max then depth_max = zv end
-                local p = (visible - 1) * 13
+                local p = (visible - 1) * 17
                 params[p + 1] = px
                 params[p + 2] = py
                 params[p + 3] = pz
@@ -396,6 +483,7 @@ elseif camera ~= nil then
                 params[p + 11] = (row + 0.03) * ATLAS_CELL
                 params[p + 12] = (col + 0.97) * ATLAS_CELL
                 params[p + 13] = (row + 0.97) * ATLAS_CELL
+                        params[p + 14], params[p + 15], params[p + 16], params[p + 17] = qr, qg, qb, qa
                 end
             end
         end
@@ -403,14 +491,20 @@ elseif camera ~= nil then
 else
     -- カメラ制御の外では XY 平面へ正射影する
     for i = 0, limit - 1 do
-        local o = i * 10
-        local bo = i * RECORD
-        local px, py = fp[o], fp[o + 1]
+        local o = i * record_floats
+        local bo = i * record_bytes
+        local px, py, pz = fp[o], fp[o + 1], fp[o + 2]
         local cxx, cxy = fp[o + 3], fp[o + 4]
         local cyy = fp[o + 6]
-        local color_index = bp[bo + 36] + bp[bo + 37] * 256
-        local alpha_index = bp[bo + 38]
-        if color_index < PALETTE_N and alpha_index > 0 then
+        local color_index, alpha_index, qr, qg, qb, qa
+                            if quality then
+                                color_index, alpha_index = 0, 1
+                                qr, qg, qb, qa = quality_color(o, px, py, pz)
+                            else
+                                color_index = bp[bo + 36] + bp[bo + 37] * 256
+                                alpha_index = bp[bo + 38]
+                            end
+                            if quality or (color_index < PALETTE_N and alpha_index > 0) then
             local r1, r2, theta
             if use_ellipse then
                 local dif = cxx - cyy
@@ -428,9 +522,11 @@ else
                 r2 = r1
                 theta = 0
             end
-            if r1 > MAX_RADIUS then r1 = MAX_RADIUS end
-            if r2 > MAX_RADIUS then r2 = MAX_RADIUS end
-            if r1 >= 0.35 then
+            if not quality then
+                if r1 > MAX_RADIUS then r1 = MAX_RADIUS end
+                if r2 > MAX_RADIUS then r2 = MAX_RADIUS end
+            end
+            if r1 >= 0.35 or quality then
             local R1, R2 = r1 * size_scale, r2 * size_scale
             local ct, st = math.cos(theta), math.sin(theta)
             local a1x, a1y = ct * R1, st * R1
@@ -442,7 +538,7 @@ else
 
             visible = visible + 1
             depth[visible] = 0
-            local p = (visible - 1) * 13
+            local p = (visible - 1) * 17
             params[p + 1] = px
             params[p + 2] = py
             params[p + 3] = 0
@@ -456,6 +552,7 @@ else
             params[p + 11] = (row + 0.03) * ATLAS_CELL
             params[p + 12] = (col + 0.97) * ATLAS_CELL
             params[p + 13] = (row + 0.97) * ATLAS_CELL
+                        params[p + 14], params[p + 15], params[p + 16], params[p + 17] = qr, qg, qb, qa
             end
         end
     end
@@ -466,10 +563,12 @@ if visible == 0 then
     return
 end
 
--- アトラスをオブジェクトの画像にする。パスはスクリプトフォルダーからの相対。
-if not obj.copybuffer("object", "image:3DGS_Su_atlas.png") then
-    show_error("3DGS_Su_atlas.png がありません")
-    return
+if not quality then
+    -- v1 の色・αアトラス。v2 はバッチごとに浮動小数アトラスを生成する。
+    if not obj.copybuffer("object", "image:3DGS_Su_atlas.png") then
+        show_error("3DGS_Su_atlas.png がありません")
+        return
+    end
 end
 
 local order = {}
@@ -499,20 +598,38 @@ if need_sort then
 else
     for i = 1, visible do order[i] = i end
 end
+if quality and need_sort then
+    table.sort(order, function(a, b) return depth[a] > depth[b] end)
+end
 
 obj.setoption("blend", (blend == 1) and "none" or "add")
 obj.setoption("culling", 0)
 obj.setoption("sampler", "clip")
 obj.setoption("focus_mode", "fixed_size")
 
--- drawpoly の呼び出し回数を減らす（6000 四角形ずつ）
-local CHUNK = 6000
+-- 旧形式は大きな描画チャンクを使う。v2 は1枚の動的 float atlas に256 splatを詰め、
+-- atlas生成→描画を深度順の各バッチごとに完了する。
+local CHUNK = quality and 256 or 6000
 local verts = {}
+local constants = {}
 local n = 0
+
+local function flush_batch()
+    if n == 0 then return end
+    if quality then
+        for i = n * 4 + 1, 1024 do constants[i] = 0 end
+        obj.clearbuffer("object", 1024, 1024)
+        obj.pixelshader("quality_atlas", "object", nil, constants, "copy")
+    end
+    obj.drawpoly(verts, master_alpha)
+    verts = {}
+    constants = {}
+    n = 0
+end
 
 for k = 1, visible do
     local i = order[k]
-    local p = (i - 1) * 13
+    local p = (i - 1) * 17
     local x, y, z = params[p + 1], params[p + 2], params[p + 3]
     local a1x, a1y, a1z = params[p + 4], params[p + 5], params[p + 6]
     local a2x, a2y, a2z = params[p + 7], params[p + 8], params[p + 9]
@@ -520,6 +637,17 @@ for k = 1, visible do
     local u1, v1 = params[p + 12], params[p + 13]
 
     n = n + 1
+    if quality then
+        local slot = n - 1
+        local col, row = slot % 16, math.floor(slot / 16)
+        u0, v0 = col * 64 + 1, row * 64 + 1
+        u1, v1 = col * 64 + 63, row * 64 + 63
+        local q = slot * 4
+        constants[q + 1] = params[p + 14]
+        constants[q + 2] = params[p + 15]
+        constants[q + 3] = params[p + 16]
+        constants[q + 4] = params[p + 17]
+    end
     verts[n] = {
         x - a1x - a2x, y - a1y - a2y, z - a1z - a2z,
         x + a1x - a2x, y + a1y - a2y, z + a1z - a2z,
@@ -528,13 +656,6 @@ for k = 1, visible do
         u0, v0, u1, v0, u1, v1, u0, v1,
     }
 
-    if n >= CHUNK then
-        obj.drawpoly(verts, master_alpha)
-        verts = {}
-        n = 0
-    end
+    if n >= CHUNK then flush_batch() end
 end
-
-if n > 0 then
-    obj.drawpoly(verts, master_alpha)
-end
+flush_batch()

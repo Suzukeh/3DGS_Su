@@ -11,9 +11,13 @@ use image::ImageFormat;
 use serde_json::Value;
 
 const MAGIC: &[u8; 8] = b"SU3DGS\0\0";
-const VERSION: u32 = 1;
+const VERSION_FAST: u32 = 1;
+const VERSION_QUALITY: u32 = 2;
 const HEADER_SIZE: usize = 40;
+const QUALITY_HEADER_SIZE: usize = 48;
 const RECORD_SIZE: usize = 40;
+const QUALITY_SH_COEFFICIENTS: usize = 45;
+const QUALITY_RECORD_SIZE: usize = 36 + 16 + QUALITY_SH_COEFFICIENTS * 4;
 
 const PALETTE_BITS: u32 = 3;
 const PALETTE_STEPS: usize = 1 << PALETTE_BITS;
@@ -33,11 +37,7 @@ const fn build_nearest_levels() -> [u8; 256] {
         let mut i = 0;
         while i < PALETTE_LEVELS.len() {
             let level = PALETTE_LEVELS[i];
-            let diff = if level >= v as i32 {
-                (level - v as i32) as u32
-            } else {
-                (v as i32 - level) as u32
-            };
+            let diff = level.abs_diff(v as i32);
             if diff < best_diff {
                 best_diff = diff;
                 best = i;
@@ -65,6 +65,8 @@ pub struct ConvertOptions {
     pub flip_z: bool,
     pub no_center: bool,
     pub no_dither: bool,
+    pub preserve_quality: bool,
+    pub keep_sh: bool,
 }
 
 impl Default for ConvertOptions {
@@ -77,6 +79,8 @@ impl Default for ConvertOptions {
             flip_z: false,
             no_center: false,
             no_dither: false,
+            preserve_quality: false,
+            keep_sh: true,
         }
     }
 }
@@ -96,6 +100,7 @@ struct RawCloud {
     pos: Vec<[f64; 3]>,
     rgb: Vec<[f64; 3]>,
     alpha: Vec<f64>,
+    sh: Vec<[f64; QUALITY_SH_COEFFICIENTS]>,
     log_scale: Vec<[f64; 3]>,
     quat: Vec<[f64; 4]>,
     format: String,
@@ -111,6 +116,7 @@ impl RawCloud {
             pos: Vec::with_capacity(count),
             rgb: Vec::with_capacity(count),
             alpha: Vec::with_capacity(count),
+            sh: Vec::with_capacity(count),
             log_scale: Vec::with_capacity(count),
             quat: Vec::with_capacity(count),
             format: format.into(),
@@ -126,7 +132,11 @@ impl RawCloud {
 pub fn convert_file(input: &Path, output: &Path, options: &ConvertOptions) -> Result<ConvertInfo> {
     let started = std::time::Instant::now();
     let raw = if is_sog(input)? {
-        load_sog(input)?
+        load_sog(
+            input,
+            options.preserve_quality && options.keep_sh,
+            options.preserve_quality,
+        )?
     } else {
         load_ply(input)?
     };
@@ -155,10 +165,8 @@ pub fn convert_file(input: &Path, output: &Path, options: &ConvertOptions) -> Re
                 max[axis] = max[axis].max(p[axis]);
             }
         }
-        let extent = (max[0] - min[0])
-            .max(max[1] - min[1])
-            .max(max[2] - min[2])
-            * options.scale.abs();
+        let extent =
+            (max[0] - min[0]).max(max[1] - min[1]).max(max[2] - min[2]) * options.scale.abs();
         if extent > 1e-9 {
             fit_scale = options.fit / extent;
             scale *= fit_scale;
@@ -196,7 +204,8 @@ pub fn convert_file(input: &Path, output: &Path, options: &ConvertOptions) -> Re
         if !pos[i].iter().all(|v| v.is_finite())
             || !cov[i].iter().all(|v| v.is_finite())
             || !raw.alpha[i].is_finite()
-            || raw.alpha[i] <= 0.004
+            || raw.alpha[i] < 0.0
+            || (!options.preserve_quality && raw.alpha[i] <= 0.004)
         {
             continue;
         }
@@ -226,7 +235,7 @@ pub fn convert_file(input: &Path, output: &Path, options: &ConvertOptions) -> Re
         }
     }
 
-    if options.max > 0 && order.len() > options.max {
+    if !options.preserve_quality && options.max > 0 && order.len() > options.max {
         order.sort_unstable_by(|&a, &b| {
             raw.alpha[b]
                 .total_cmp(&raw.alpha[a])
@@ -245,8 +254,81 @@ pub fn convert_file(input: &Path, output: &Path, options: &ConvertOptions) -> Re
         }
     }
 
-    let mut body = Vec::with_capacity(written * RECORD_SIZE);
+    if options.preserve_quality {
+        // 品質v2は全フィールドを f32 で書き出す。NaN/Inf や f64→f32 の
+        // オーバーフローをそのまま出力しないよう、書き込み前に一括検証する。
+        // SH は実際に保存する場合だけ対象にする (keep_sh=false では 0 を保存)。
+        let require_f32_finite =
+            |point: Option<usize>, label: &str, component: usize, value: f64| -> Result<()> {
+                if value.is_finite() && (value as f32).is_finite() {
+                    return Ok(());
+                }
+                let reason = if value.is_finite() {
+                    "f32 の範囲を超えています"
+                } else {
+                    "有限値ではありません"
+                };
+                let point = match point {
+                    Some(point) => format!("点 {point} の"),
+                    None => String::new(),
+                };
+                Err(error(format!(
+                    "品質v2で出力する{point}{label}[{component}]が{reason} (値 {value})"
+                )))
+            };
+        for &i in &order {
+            for (component, value) in pos[i].iter().enumerate() {
+                require_f32_finite(Some(i), "位置", component, *value)?;
+            }
+            for (component, value) in cov[i].iter().enumerate() {
+                require_f32_finite(Some(i), "共分散", component, *value)?;
+            }
+            for (component, value) in raw.rgb[i].iter().enumerate() {
+                require_f32_finite(Some(i), "RGB", component, *value)?;
+            }
+            require_f32_finite(Some(i), "不透明度", 0, raw.alpha[i])?;
+            if options.keep_sh {
+                for (component, value) in raw.sh[i].iter().enumerate() {
+                    require_f32_finite(Some(i), "SH係数", component, *value)?;
+                }
+            }
+        }
+        for (axis, value) in bounds_min.iter().enumerate() {
+            require_f32_finite(None, "境界最小値", axis, *value)?;
+        }
+        for (axis, value) in bounds_max.iter().enumerate() {
+            require_f32_finite(None, "境界最大値", axis, *value)?;
+        }
+    }
+
+    let record_size = if options.preserve_quality {
+        QUALITY_RECORD_SIZE
+    } else {
+        RECORD_SIZE
+    };
+    let mut body = Vec::with_capacity(written * record_size);
     for &i in &order {
+        if options.preserve_quality {
+            for value in pos[i] {
+                body.extend_from_slice(&(value as f32).to_le_bytes());
+            }
+            for value in cov[i] {
+                body.extend_from_slice(&(value as f32).to_le_bytes());
+            }
+            for value in raw.rgb[i] {
+                body.extend_from_slice(&(value as f32).to_le_bytes());
+            }
+            body.extend_from_slice(&(raw.alpha[i] as f32).to_le_bytes());
+            for value in if options.keep_sh {
+                raw.sh[i]
+            } else {
+                [0.0; QUALITY_SH_COEFFICIENTS]
+            } {
+                body.extend_from_slice(&(value as f32).to_le_bytes());
+            }
+            continue;
+        }
+
         let mut rgb = raw.rgb[i];
         if !options.no_dither {
             for (channel, value) in rgb.iter_mut().enumerate() {
@@ -269,9 +351,20 @@ pub fn convert_file(input: &Path, output: &Path, options: &ConvertOptions) -> Re
         body.push(0);
     }
 
-    let mut header = Vec::with_capacity(HEADER_SIZE);
+    let mut header = Vec::with_capacity(if options.preserve_quality {
+        QUALITY_HEADER_SIZE
+    } else {
+        HEADER_SIZE
+    });
     header.extend_from_slice(MAGIC);
-    header.extend_from_slice(&VERSION.to_le_bytes());
+    header.extend_from_slice(
+        &(if options.preserve_quality {
+            VERSION_QUALITY
+        } else {
+            VERSION_FAST
+        })
+        .to_le_bytes(),
+    );
     header.extend_from_slice(&(written as u32).to_le_bytes());
     for value in bounds_min {
         header.extend_from_slice(&(value as f32).to_le_bytes());
@@ -279,8 +372,28 @@ pub fn convert_file(input: &Path, output: &Path, options: &ConvertOptions) -> Re
     for value in bounds_max {
         header.extend_from_slice(&(value as f32).to_le_bytes());
     }
-    debug_assert_eq!(header.len(), HEADER_SIZE);
-    debug_assert_eq!(body.len(), written * RECORD_SIZE);
+    if options.preserve_quality {
+        header.extend_from_slice(&(record_size as u32).to_le_bytes());
+        let sh_degree = if options.keep_sh {
+            raw.sh_bands.unwrap_or(0) & 0x03
+        } else {
+            0
+        };
+        let flags = ((sh_degree as u32) << 8)
+            | ((sh_degree > 0) as u32)
+            | ((options.flip_y as u32) << 1)
+            | ((options.flip_z as u32) << 2);
+        header.extend_from_slice(&flags.to_le_bytes());
+    }
+    debug_assert_eq!(
+        header.len(),
+        if options.preserve_quality {
+            QUALITY_HEADER_SIZE
+        } else {
+            HEADER_SIZE
+        }
+    );
+    debug_assert_eq!(body.len(), written * record_size);
 
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
@@ -327,8 +440,8 @@ pub fn convert_file(input: &Path, output: &Path, options: &ConvertOptions) -> Re
 }
 
 fn covariance(quat: [f64; 4], log_scale: [f64; 3]) -> [f64; 6] {
-    let norm = (quat[0] * quat[0] + quat[1] * quat[1] + quat[2] * quat[2] + quat[3] * quat[3])
-        .sqrt();
+    let norm =
+        (quat[0] * quat[0] + quat[1] * quat[1] + quat[2] * quat[2] + quat[3] * quat[3]).sqrt();
     let norm = if norm < 1e-12 { 1.0 } else { norm };
     let w = quat[0] / norm;
     let x = quat[1] / norm;
@@ -406,6 +519,18 @@ fn dither(index: usize, channel: usize) -> f64 {
 // ---------------------------------------------------------------------------
 // PLY
 // ---------------------------------------------------------------------------
+
+fn ply_sh_degree(coefficient_count: usize) -> Result<Option<u32>> {
+    match coefficient_count {
+        0 => Ok(None),
+        9 => Ok(Some(1)),
+        24 => Ok(Some(2)),
+        45 => Ok(Some(3)),
+        count => Err(error(format!(
+            "PLY f_rest_* の係数数が不正です ({count}; 9/24/45 が必要です)"
+        ))),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PropType {
@@ -591,6 +716,15 @@ fn load_ply_binary(
         Some((a, at, b, bt, c, ct, false))
     };
     let (cr, crt, cg, cgt, cb, cbt, is_dc) = color.ok_or_else(|| error("PLY に色がありません"))?;
+    let sh_props: Vec<Option<(usize, PropType)>> = (0..QUALITY_SH_COEFFICIENTS)
+        .map(|i| property_offset(header, &[&format!("f_rest_{i}")]).ok())
+        .collect();
+    let sh_count = sh_props.iter().take_while(|prop| prop.is_some()).count();
+    if sh_props.iter().skip(sh_count).any(Option::is_some) {
+        return Err(error("PLY の f_rest_* が連続していません"));
+    }
+    let sh_degree = ply_sh_degree(sh_count)?;
+    raw.sh_bands = sh_degree;
 
     let mut base = header.header_len;
     for _ in 0..header.count {
@@ -614,11 +748,8 @@ fn load_ply_binary(
         raw.quat.push([r0, r1, r2, r3]);
         raw.alpha.push(sigmoid(op));
         if is_dc {
-            raw.rgb.push([
-                (0.5 + SH_C0 * c0).clamp(0.0, 1.0),
-                (0.5 + SH_C0 * c1).clamp(0.0, 1.0),
-                (0.5 + SH_C0 * c2).clamp(0.0, 1.0),
-            ]);
+            raw.rgb
+                .push([0.5 + SH_C0 * c0, 0.5 + SH_C0 * c1, 0.5 + SH_C0 * c2]);
         } else {
             let max = c0.max(c1).max(c2);
             let divisor = if max > 1.5 { 255.0 } else { 1.0 };
@@ -628,13 +759,26 @@ fn load_ply_binary(
                 (c2 / divisor).clamp(0.0, 1.0),
             ]);
         }
+        let mut sh = [0.0; QUALITY_SH_COEFFICIENTS];
+        let coeffs_per_channel = sh_count / 3;
+        for (source_index, prop) in sh_props.iter().enumerate().take(sh_count) {
+            let target_index =
+                (source_index / coeffs_per_channel) * 15 + source_index % coeffs_per_channel;
+            let (offset, ty) = prop.expect("validated SH property range");
+            sh[target_index] = read_prop(data, base + offset, ty, big_endian);
+        }
+        raw.sh.push(sh);
         base += header.stride;
     }
     Ok(())
 }
 
 fn load_ply_ascii(data: &[u8], header: &PlyHeader, raw: &mut RawCloud) -> Result<()> {
-    let names: Vec<&str> = header.props.iter().map(|(name, _, _)| name.as_str()).collect();
+    let names: Vec<&str> = header
+        .props
+        .iter()
+        .map(|(name, _, _)| name.as_str())
+        .collect();
     let index = |target: &str| {
         names
             .iter()
@@ -652,12 +796,23 @@ fn load_ply_ascii(data: &[u8], header: &PlyHeader, raw: &mut RawCloud) -> Result
     let r1 = index("rot_1")?;
     let r2 = index("rot_2")?;
     let r3 = index("rot_3")?;
-    let is_dc = names.iter().any(|name| *name == "f_dc_0");
+    let is_dc = names.contains(&"f_dc_0");
     let (cr, cg, cb) = if is_dc {
         (index("f_dc_0")?, index("f_dc_1")?, index("f_dc_2")?)
     } else {
         (index("red")?, index("green")?, index("blue")?)
     };
+    let sh_indices: Vec<Option<usize>> = (0..QUALITY_SH_COEFFICIENTS)
+        .map(|i| names.iter().position(|name| *name == format!("f_rest_{i}")))
+        .collect();
+    let sh_count = sh_indices
+        .iter()
+        .take_while(|index| index.is_some())
+        .count();
+    if sh_indices.iter().skip(sh_count).any(Option::is_some) {
+        return Err(error("PLY の f_rest_* が連続していません"));
+    }
+    raw.sh_bands = ply_sh_degree(sh_count)?;
 
     let text = String::from_utf8_lossy(data);
     for line in text.lines() {
@@ -667,15 +822,14 @@ fn load_ply_ascii(data: &[u8], header: &PlyHeader, raw: &mut RawCloud) -> Result
         }
         let value = |i: usize| -> f64 { parts[i].parse().unwrap_or(f64::NAN) };
         raw.pos.push([value(x), value(y), value(z)]);
-        raw.log_scale
-            .push([value(s0), value(s1), value(s2)]);
+        raw.log_scale.push([value(s0), value(s1), value(s2)]);
         raw.quat.push([value(r0), value(r1), value(r2), value(r3)]);
         raw.alpha.push(sigmoid(value(op)));
         if is_dc {
             raw.rgb.push([
-                (0.5 + SH_C0 * value(cr)).clamp(0.0, 1.0),
-                (0.5 + SH_C0 * value(cg)).clamp(0.0, 1.0),
-                (0.5 + SH_C0 * value(cb)).clamp(0.0, 1.0),
+                0.5 + SH_C0 * value(cr),
+                0.5 + SH_C0 * value(cg),
+                0.5 + SH_C0 * value(cb),
             ]);
         } else {
             let c0 = value(cr);
@@ -688,6 +842,14 @@ fn load_ply_ascii(data: &[u8], header: &PlyHeader, raw: &mut RawCloud) -> Result
                 (c2 / divisor).clamp(0.0, 1.0),
             ]);
         }
+        let mut sh = [0.0; QUALITY_SH_COEFFICIENTS];
+        let coeffs_per_channel = sh_count / 3;
+        for (source_index, prop) in sh_indices.iter().enumerate().take(sh_count) {
+            let target_index =
+                (source_index / coeffs_per_channel) * 15 + source_index % coeffs_per_channel;
+            sh[target_index] = value(prop.expect("validated SH property range"));
+        }
+        raw.sh.push(sh);
     }
     Ok(())
 }
@@ -718,10 +880,7 @@ fn read_prop(data: &[u8], offset: usize, ty: PropType, big_endian: bool) -> f64 
         PropType::U32 => read_u32(data, offset, big_endian) as f64,
         PropType::F32 => f32::from_bits(read_u32(data, offset, big_endian)) as f64,
         PropType::F64 => {
-            let b = [
-                bytes(0)[0], bytes(1)[0], bytes(2)[0], bytes(3)[0],
-                bytes(4)[0], bytes(5)[0], bytes(6)[0], bytes(7)[0],
-            ];
+            let b: [u8; 8] = bytes(8).try_into().expect("validated property bounds");
             if big_endian {
                 f64::from_be_bytes(b)
             } else {
@@ -759,53 +918,57 @@ fn is_sog(path: &Path) -> Result<bool> {
     if path.is_dir() {
         return Ok(path.join("meta.json").is_file());
     }
-    if path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("sog")) {
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("sog"))
+    {
         return Ok(true);
     }
     let file = File::open(path)?;
     Ok(zip::ZipArchive::new(file).is_ok())
 }
 
-fn load_sog(path: &Path) -> Result<RawCloud> {
-    let (meta, license, read_file): (Value, Option<String>, Box<dyn Fn(&str) -> Result<Vec<u8>>>) =
-        if path.is_dir() {
-            let meta_bytes = fs::read(path.join("meta.json"))?;
-            let meta: Value = serde_json::from_slice(&meta_bytes)?;
-            let license = fs::read_to_string(path.join("license.txt")).ok();
-            let root = path.to_path_buf();
-            let reader = Box::new(move |name: &str| Ok(fs::read(root.join(name))?));
-            (meta, license, reader)
-        } else {
-            let file = File::open(path)?;
-            let mut archive = zip::ZipArchive::new(file)?;
-            let meta: Value = {
-                let mut entry = archive.by_name("meta.json")?;
-                let mut bytes = Vec::new();
-                entry.read_to_end(&mut bytes)?;
-                serde_json::from_slice(&bytes)?
-            };
-            let license = {
-                match archive.by_name("license.txt") {
-                    Ok(mut entry) => {
-                        let mut text = String::new();
-                        entry.read_to_string(&mut text).ok();
-                        Some(text)
-                    }
-                    Err(_) => None,
-                }
-            };
-            // zip はファイルごとに開き直す。SOG の数 MB なら十分速い。
-            let path = path.to_path_buf();
-            let reader = Box::new(move |name: &str| -> Result<Vec<u8>> {
-                let file = File::open(&path)?;
-                let mut archive = zip::ZipArchive::new(file)?;
-                let mut entry = archive.by_name(name)?;
-                let mut bytes = Vec::new();
-                entry.read_to_end(&mut bytes)?;
-                Ok(bytes)
-            });
-            (meta, license, reader)
+fn load_sog(path: &Path, require_sh_decode: bool, preserve_quality: bool) -> Result<RawCloud> {
+    type SogReader = Box<dyn Fn(&str) -> Result<Vec<u8>>>;
+    let (meta, license, read_file): (Value, Option<String>, SogReader) = if path.is_dir() {
+        let meta_bytes = fs::read(path.join("meta.json"))?;
+        let meta: Value = serde_json::from_slice(&meta_bytes)?;
+        let license = fs::read_to_string(path.join("license.txt")).ok();
+        let root = path.to_path_buf();
+        let reader = Box::new(move |name: &str| Ok(fs::read(root.join(name))?));
+        (meta, license, reader)
+    } else {
+        let file = File::open(path)?;
+        let mut archive = zip::ZipArchive::new(file)?;
+        let meta: Value = {
+            let mut entry = archive.by_name("meta.json")?;
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            serde_json::from_slice(&bytes)?
         };
+        let license = {
+            match archive.by_name("license.txt") {
+                Ok(mut entry) => {
+                    let mut text = String::new();
+                    entry.read_to_string(&mut text).ok();
+                    Some(text)
+                }
+                Err(_) => None,
+            }
+        };
+        // zip はファイルごとに開き直す。SOG の数 MB なら十分速い。
+        let path = path.to_path_buf();
+        let reader = Box::new(move |name: &str| -> Result<Vec<u8>> {
+            let file = File::open(&path)?;
+            let mut archive = zip::ZipArchive::new(file)?;
+            let mut entry = archive.by_name(name)?;
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        });
+        (meta, license, reader)
+    };
 
     let count = meta["count"]
         .as_u64()
@@ -841,9 +1004,74 @@ fn load_sog(path: &Path) -> Result<RawCloud> {
         return Err(error("SOG の codebook が 256 要素未満です"));
     }
     let sh_bands = meta["shN"]["bands"].as_u64().map(|v| v as u32);
-    let generator = meta["asset"]["generator"]
-        .as_str()
-        .map(ToString::to_string);
+    let sog_has_shn = meta["shN"]["files"]
+        .as_array()
+        .is_some_and(|files| !files.is_empty());
+    let sh_coeff_count = match sh_bands.unwrap_or(0) {
+        0 => 0,
+        1 => 3,
+        2 => 8,
+        3 => 15,
+        bands => {
+            return Err(error(format!(
+                "SOG SH band {bands} はv2形式の45係数を超えるため非対応です"
+            )));
+        }
+    };
+    let sh_values = if require_sh_decode && sog_has_shn {
+        let files = read_files(&meta["shN"]["files"])?;
+        if files.len() < 2 {
+            return Err(error("SOG shN の labels/centroids が不足しています"));
+        }
+        let centroids_file = read_file(&files[0])?;
+        let labels_file = read_file(&files[1])?;
+        let (centroids, width) = decode_sog_image_with_width(&centroids_file)?;
+        let labels = decode_sog_image(&labels_file, count)?;
+        let codebook = read_codebook(&meta["shN"]["codebook"])?;
+        let version = meta["version"].as_u64().unwrap_or(2);
+        let mut values = vec![[0.0; QUALITY_SH_COEFFICIENTS]; count];
+        if sh_coeff_count > 0 {
+            for i in 0..count {
+                let n = labels[i * 4] as usize
+                    | ((labels[i * 4 + 1] as usize) << 8)
+                    | if version >= 3 {
+                        (labels[i * 4 + 2] as usize) << 16
+                    } else {
+                        0
+                    };
+                let u = (n % 64) * sh_coeff_count;
+                let v = n / 64;
+                for channel in 0..3 {
+                    for k in 0..sh_coeff_count {
+                        let at = ((u + k) * 4 + channel) + v * width * 4;
+                        let byte = *centroids
+                            .get(at)
+                            .ok_or_else(|| error("SOG shN centroid index が画像範囲外です"))?;
+                        let decoded = if version >= 2 {
+                            *codebook
+                                .get(byte as usize)
+                                .ok_or_else(|| error("SOG shN codebook index が範囲外です"))?
+                        } else {
+                            let t = byte as f64 / 255.0;
+                            let lo = meta["shN"]["mins"].as_f64().unwrap_or(0.0);
+                            let hi = meta["shN"]["maxs"].as_f64().unwrap_or(0.0);
+                            lo * (1.0 - t) + hi * t
+                        };
+                        values[i][channel * 15 + k] = decoded;
+                    }
+                }
+            }
+        }
+        Some(values)
+    } else {
+        if require_sh_decode && sh_coeff_count > 0 {
+            return Err(error(
+                "SOG shN の画像ファイルがありません。--no-sh でSH保持を無効にできます",
+            ));
+        }
+        None
+    };
+    let generator = meta["asset"]["generator"].as_str().map(ToString::to_string);
 
     let mut raw = RawCloud::with_capacity(count, "sog");
     raw.sh_bands = sh_bands;
@@ -881,7 +1109,11 @@ fn load_sog(path: &Path) -> Result<RawCloud> {
             0.5 + sh_cb[sh0[i * 4 + 1] as usize] * SH_C0,
             0.5 + sh_cb[sh0[i * 4 + 2] as usize] * SH_C0,
         ];
-        let alpha = (sh0[i * 4 + 3] as f64 / 255.0).clamp(1.0 / 255.0, 254.0 / 255.0);
+        let alpha = if preserve_quality {
+            sh0[i * 4 + 3] as f64 / 255.0
+        } else {
+            (sh0[i * 4 + 3] as f64 / 255.0).clamp(1.0 / 255.0, 254.0 / 255.0)
+        };
         let opacity = (alpha / (1.0 - alpha)).ln();
 
         raw.pos.push(pos);
@@ -893,6 +1125,12 @@ fn load_sog(path: &Path) -> Result<RawCloud> {
             scale_cb[scales[i * 4 + 2] as usize],
         ]);
         raw.quat.push(quat);
+        raw.sh.push(
+            sh_values
+                .as_ref()
+                .map(|values| values[i])
+                .unwrap_or([0.0; QUALITY_SH_COEFFICIENTS]),
+        );
     }
 
     raw.points_in_source = count;
@@ -927,10 +1165,15 @@ fn read_codebook(value: &Value) -> Result<Vec<f64>> {
     let array = value
         .as_array()
         .ok_or_else(|| error("SOG の codebook が不正です"))?;
-    Ok(array
-        .iter()
-        .map(|v| v.as_f64().unwrap_or(0.0))
-        .collect())
+    Ok(array.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect())
+}
+
+fn decode_sog_image_with_width(bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
+    let image = image::load_from_memory_with_format(bytes, ImageFormat::WebP)
+        .map_err(|e| error(format!("SOG の WebP をデコードできません: {e}")))?;
+    let width = image.width() as usize;
+    let rgba = image.to_rgba8().into_raw();
+    Ok((rgba, width))
 }
 
 fn decode_sog_image(bytes: &[u8], count: usize) -> Result<Vec<u8>> {
@@ -945,4 +1188,194 @@ fn decode_sog_image(bytes: &[u8], count: usize) -> Result<Vec<u8>> {
         )));
     }
     Ok(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ascii_ply(points: usize) -> Vec<u8> {
+        let mut header = format!("ply\nformat ascii 1.0\nelement vertex {points}\n");
+        for name in [
+            "x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "scale_1",
+            "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
+        ] {
+            header.push_str(&format!("property float {name}\n"));
+        }
+        for i in 0..QUALITY_SH_COEFFICIENTS {
+            header.push_str(&format!("property float f_rest_{i}\n"));
+        }
+        header.push_str("end_header\n");
+        for i in 0..points {
+            let mut values = vec![
+                i as f32, 0.0, 0.0, 0.2, 0.3, 0.4, -8.0, -2.0, -2.0, -2.0, 1.0, 0.0, 0.0, 0.0,
+            ];
+            values.extend((0..QUALITY_SH_COEFFICIENTS).map(|j| if j == 0 { 0.125 } else { 0.0 }));
+            header.push_str(
+                &values
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+            header.push('\n');
+        }
+        header.into_bytes()
+    }
+
+    fn with_fixture<T>(data: &[u8], run: impl FnOnce(&Path, &Path) -> T) -> T {
+        static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("su3ds-test-{}-{id}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("fixture.ply");
+        let output = root.join("fixture.su3ds");
+        fs::write(&input, data).unwrap();
+        let result = run(&input, &output);
+        let _ = fs::remove_dir_all(root);
+        result
+    }
+
+    #[test]
+    fn double_precision_properties_decode_in_both_byte_orders() {
+        let value = 0.125_f64;
+        assert_eq!(
+            read_prop(&value.to_le_bytes(), 0, PropType::F64, false),
+            value
+        );
+        assert_eq!(
+            read_prop(&value.to_be_bytes(), 0, PropType::F64, true),
+            value
+        );
+    }
+
+    #[test]
+    fn quality_keeps_every_point_and_float_color_alpha_and_sh() {
+        with_fixture(&ascii_ply(2), |input, output| {
+            let options = ConvertOptions {
+                preserve_quality: true,
+                max: 1,
+                no_dither: false,
+                ..Default::default()
+            };
+            let info = convert_file(input, output, &options).unwrap();
+            assert_eq!(info.points_written, 2);
+            let bytes = fs::read(output).unwrap();
+            assert_eq!(
+                u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+                VERSION_QUALITY
+            );
+            assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 2);
+            assert_eq!(
+                u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize,
+                QUALITY_RECORD_SIZE
+            );
+            let r = &bytes[QUALITY_HEADER_SIZE..QUALITY_HEADER_SIZE + QUALITY_RECORD_SIZE];
+            let floats: Vec<f32> = r
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            assert!((floats[9] - (0.5 + SH_C0 as f32 * 0.2)).abs() < 1e-6);
+            assert!((floats[12] - sigmoid(-8.0) as f32).abs() < 1e-6);
+            assert_eq!(floats[13], 0.125);
+        });
+    }
+
+    #[test]
+    fn default_conversion_keeps_v1_record_layout() {
+        let fixture = String::from_utf8(ascii_ply(1))
+            .unwrap()
+            .replace(" -8 ", " -2 ");
+        with_fixture(fixture.as_bytes(), |input, output| {
+            convert_file(input, output, &ConvertOptions::default()).unwrap();
+            let bytes = fs::read(output).unwrap();
+            assert_eq!(
+                u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+                VERSION_FAST
+            );
+            assert_eq!(bytes.len(), HEADER_SIZE + RECORD_SIZE);
+        });
+    }
+
+    fn quality_error_for(fixture: &[u8]) -> String {
+        with_fixture(fixture, |input, output| {
+            let options = ConvertOptions {
+                preserve_quality: true,
+                ..Default::default()
+            };
+            let err = convert_file(input, output, &options).unwrap_err();
+            assert!(!output.exists(), "不正入力なのに出力が作成されました");
+            err.to_string()
+        })
+    }
+
+    #[test]
+    fn quality_rejects_non_finite_rgb_and_sh() {
+        let base = || String::from_utf8(ascii_ply(1)).unwrap();
+        let cases = [
+            (
+                base()
+                    .replace(" 0.2 0.3 0.4 ", " nan 0.3 0.4 ")
+                    .into_bytes(),
+                "RGB",
+            ),
+            (
+                base()
+                    .replace(" 0.2 0.3 0.4 ", " inf 0.3 0.4 ")
+                    .into_bytes(),
+                "RGB",
+            ),
+            (base().replace(" 0.125 0", " inf 0").into_bytes(), "SH係数"),
+        ];
+        for (fixture, expected) in cases {
+            let message = quality_error_for(&fixture);
+            assert!(
+                message.contains(expected),
+                "{expected} のエラーではありません: {message}"
+            );
+            assert!(
+                message.contains("品質v2"),
+                "日本語の品質v2エラーではありません: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn quality_rejects_values_that_overflow_f32() {
+        let base = || String::from_utf8(ascii_ply(1)).unwrap();
+        let fixtures = [
+            base()
+                .replace(" 0.2 0.3 0.4 ", " 1e300 0.3 0.4 ")
+                .into_bytes(),
+            base().replace(" 0.125 0", " 1e300 0").into_bytes(),
+        ];
+        for fixture in fixtures {
+            let message = quality_error_for(&fixture);
+            assert!(
+                message.contains("f32"),
+                "f32 範囲超過のエラーではありません: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn quality_does_not_validate_sh_when_it_is_not_saved() {
+        let fixture = String::from_utf8(ascii_ply(1))
+            .unwrap()
+            .replace(" 0.125 0", " nan 0");
+        with_fixture(fixture.as_bytes(), |input, output| {
+            let options = ConvertOptions {
+                preserve_quality: true,
+                keep_sh: false,
+                ..Default::default()
+            };
+            let info = convert_file(input, output, &options).unwrap();
+            assert_eq!(info.points_written, 1);
+            let bytes = fs::read(output).unwrap();
+            let record = &bytes[QUALITY_HEADER_SIZE..QUALITY_HEADER_SIZE + QUALITY_RECORD_SIZE];
+            for chunk in record[36 + 16..].chunks_exact(4) {
+                assert_eq!(f32::from_le_bytes(chunk.try_into().unwrap()), 0.0);
+            }
+        });
+    }
 }

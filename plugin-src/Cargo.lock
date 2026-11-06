@@ -196,8 +196,6 @@ dependencies = [
 [[package]]
 name = "aviutl2-eframe"
 version = "0.43.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f44842c695e321f310d6595d7c297b3e495356662282d3a98221138af50ece6"
 dependencies = [
  "anyhow",
  "aviutl2",
@@ -2729,13 +2727,14 @@ dependencies = [
 
 [[package]]
 name = "three_dgs_converter_su"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aviutl2",
  "aviutl2-eframe",
  "image",
  "native-dialog",
  "raw-window-handle",
+ "serde",
  "serde_json",
  "tracing",
  "windows-sys 0.59.0",

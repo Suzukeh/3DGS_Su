@@ -48,6 +48,18 @@ def main() -> None:
     shutil.copy2(dll, build / "Plugin" / "3DGSConverter_Su" / "three_dgs_converter_su.aux2")
     shutil.copy2(exe, build / "Plugin" / "3DGSConverter_Su" / "su3ds.exe")
     shutil.copy2(ROOT / "README.md", build / "README.md")
+    # オフラインで使い方を読めるよう、詳細MDと作例GIFを同梱する。
+    docs = ROOT / "docs"
+    for source in docs.rglob("*"):
+        if source.is_file() and source.suffix.lower() in {".md", ".gif", ".png"}:
+            target = build / "docs" / source.relative_to(docs)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+    readme = build / "README.md"
+    text = readme.read_text(encoding="utf-8-sig")
+    text = text.replace("https://github.com/Suzukeh/3DGS_Su/blob/main/docs/", "docs/")
+    text = text.replace("https://raw.githubusercontent.com/Suzukeh/3DGS_Su/refs/heads/main/docs/", "docs/")
+    readme.write_text(text, encoding="utf-8")
     shutil.copy2(ROOT / "LICENSE", build / "LICENSE")
     shutil.copy2(ROOT / "THIRD_PARTY_LICENSES.md", build / "THIRD_PARTY_LICENSES.md")
 

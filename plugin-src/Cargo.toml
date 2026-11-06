@@ -1,12 +1,16 @@
 [package]
 name = "three_dgs_converter_su"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 publish = false
 
 [lib]
 name = "three_dgs_converter_su"
 crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+selftest = []
 
 [dependencies]
 aviutl2 = "=0.43.0"
@@ -15,6 +19,7 @@ raw-window-handle = "0.6"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 native-dialog = "0.9.7"
 tracing = "0.1.44"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["webp"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
@@ -23,3 +28,6 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+[patch.crates-io]
+aviutl2-eframe = { path = "vendor/aviutl2-eframe" }

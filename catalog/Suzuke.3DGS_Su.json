@@ -6,7 +6,7 @@
   "description": "https://raw.githubusercontent.com/Suzukeh/3DGS_Su/main/README.md",
   "author": "Suzuke",
   "repoURL": "https://github.com/Suzukeh/3DGS_Su",
-  "latest-version": "v0.4.0",
+  "latest-version": "v0.5.0",
   "licenses": [
     {
       "type": "MIT",
@@ -120,6 +120,28 @@
         {
           "path": "{pluginsDir}/3DGSConverter_Su/su3ds.exe",
           "XXH3_128": "84b1b5dffe40ec743352638f5483abc9"
+        }
+      ]
+    },
+    {
+      "version": "v0.5.0",
+      "release_date": "2026-11-07",
+      "file": [
+        {
+          "path": "{scriptsDir}/3DGS_Su/3DGS_Su.obj2",
+          "XXH3_128": "519db53d5955fbad4ffb6e8da71b73d2"
+        },
+        {
+          "path": "{scriptsDir}/3DGS_Su/3DGS_Su_atlas.png",
+          "XXH3_128": "2a0e792d9e6819be2c11d14c76b8e29f"
+        },
+        {
+          "path": "{pluginsDir}/3DGSConverter_Su/three_dgs_converter_su.aux2",
+          "XXH3_128": "26b347e089d843d0df86df475941d121"
+        },
+        {
+          "path": "{pluginsDir}/3DGSConverter_Su/su3ds.exe",
+          "XXH3_128": "40e753aee82f2d0554f7c1b587f406d0"
         }
       ]
     }

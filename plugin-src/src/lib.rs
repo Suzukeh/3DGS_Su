@@ -5,18 +5,20 @@
 //! 変換はプラグイン内の Rust 実装で行い、外部プロセスを使わない。
 
 pub mod convert;
-mod gui;
+pub mod gui;
+mod host;
+pub mod settings;
+pub(crate) use host::{apply_properties, capture_targets, current_epoch, read_properties};
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
-use aviutl2::config::app_data_path;
-use aviutl2::generic::{GlobalEditHandle, ObjectHandle};
+use aviutl2::generic::GlobalEditHandle;
 use aviutl2::{AnyResult, generic::GenericPlugin};
 use aviutl2_eframe::EframeWindow;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 pub use convert::{ConvertInfo, ConvertOptions, convert_file};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 const EFFECT: &str = "3DGS_Su";
 const ITEM: &str = "3DGSファイル(.su3ds)";
@@ -25,7 +27,6 @@ const LAST_FILE: &str = "last_converted.txt";
 
 pub(crate) static EDIT_HANDLE: GlobalEditHandle = GlobalEditHandle::new();
 static WINDOW_HWND: OnceLock<isize> = OnceLock::new();
-static TARGETS: Mutex<Vec<ObjectHandle>> = Mutex::new(Vec::new());
 
 #[aviutl2::plugin(GenericPlugin)]
 pub struct ThreeDgsConverterSu {
@@ -83,6 +84,22 @@ impl GenericPlugin for ThreeDgsConverterSu {
         show_window();
         tracing::info!("3DGSConverter_Su UI registered");
     }
+
+    fn on_project_load(&mut self, _project: &mut aviutl2::generic::ProjectFile) {
+        host::invalidate_targets();
+    }
+
+    fn event_change_scene_info(&mut self) {
+        host::invalidate_targets();
+    }
+}
+
+impl Drop for ThreeDgsConverterSu {
+    fn drop(&mut self) {
+        host::SHUTDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+        // UIと変換ワーカーが終了してからDLLをアンロードする。
+        drop(self.window.take());
+    }
 }
 
 impl ThreeDgsConverterSu {
@@ -102,7 +119,14 @@ impl ThreeDgsConverterSu {
 aviutl2::register_generic_plugin!(ThreeDgsConverterSu);
 
 pub(crate) fn plugin_data_dir() -> PathBuf {
-    app_data_path().join("Plugin").join(PLUGIN_DIR)
+    std::env::var_os("THREEDGS_SETTINGS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir)
+                .join(PLUGIN_DIR)
+        })
 }
 
 /// 登録済みの専用UIを前面に出す。AviUtl2 のメニューから呼ばれる。
@@ -126,8 +150,8 @@ pub(crate) fn show_window() {
             if !parent.is_null() {
                 windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(parent, &mut client);
             }
-            let width = 760;
-            let height = 280;
+            let width = (client.right - 40).clamp(320, 900);
+            let height = (client.bottom - 60).clamp(240, 640);
             let y = (client.bottom - height - 20).max(0);
             windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPos(
                 handle,
@@ -160,46 +184,14 @@ pub(crate) fn write_last_file(path: &Path) -> AnyResult<()> {
     Ok(())
 }
 
-/// 選択が UI クリックで外れる前に、対象オブジェクトを覚えておく。
 pub(crate) fn capture_selection() {
-    if !EDIT_HANDLE.is_ready() {
-        return;
-    }
-    let objects = EDIT_HANDLE
-        .call_edit_section(|section| {
-            let mut objects = section.get_selected_objects().unwrap_or_default();
-            if objects.is_empty()
-                && let Ok(Some(object)) = section.get_focused_object()
-            {
-                objects.push(object);
-            }
-            objects
-        })
-        .unwrap_or_default();
-    if objects.is_empty() {
-        return;
-    }
-    if let Ok(mut targets) = TARGETS.lock() {
-        *targets = objects;
+    if let Err(error) = capture_targets() {
+        tracing::warn!("対象取得: {error}");
     }
 }
 
 pub(crate) fn selected_count() -> AnyResult<usize> {
-    if !EDIT_HANDLE.is_ready() {
-        return Ok(0);
-    }
-    capture_selection();
-    let fallback = TARGETS.lock().map(|targets| targets.len()).unwrap_or(0);
-    Ok(EDIT_HANDLE.call_edit_section(|section| {
-        let objects = section.get_selected_objects().unwrap_or_default();
-        if !objects.is_empty() {
-            return objects.len();
-        }
-        if section.get_focused_object().ok().flatten().is_some() {
-            return 1;
-        }
-        fallback
-    })?)
+    Ok(capture_targets()?.len())
 }
 
 pub(crate) fn pick_file(title: &str, extensions: &[&str]) -> AnyResult<Option<PathBuf>> {
@@ -209,32 +201,4 @@ pub(crate) fn pick_file(title: &str, extensions: &[&str]) -> AnyResult<Option<Pa
         .open_single_file()
         .show()?;
     Ok(selected)
-}
-
-pub(crate) fn apply_to_selection(path: &Path) -> AnyResult<usize> {
-    let value = path.to_string_lossy().to_string();
-    let fallback = TARGETS.lock().map(|targets| targets.clone()).unwrap_or_default();
-    let applied = EDIT_HANDLE.call_edit_section(move |section| {
-        let mut applied = 0usize;
-        let mut objects = section.get_selected_objects().unwrap_or_default();
-        if objects.is_empty()
-            && let Ok(Some(object)) = section.get_focused_object()
-        {
-            objects.push(object);
-        }
-        if objects.is_empty() {
-            objects = fallback;
-        }
-        for object in objects {
-            if section
-                .set_object_effect_item(object, EFFECT, 0, ITEM, &value)
-                .is_ok()
-            {
-                applied += 1;
-            }
-        }
-        applied
-    })?;
-    tracing::info!("applied {:?} to {} object(s)", path, applied);
-    Ok(applied)
 }

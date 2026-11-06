@@ -6,14 +6,16 @@
 
 use std::path::PathBuf;
 
-use three_dgs_converter_su::convert::{convert_file, ConvertOptions};
+use three_dgs_converter_su::convert::{ConvertOptions, convert_file};
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let input = match args.next() {
         Some(path) => PathBuf::from(path),
         None => {
-            eprintln!("usage: su3ds <input.sog|input.ply> [-o output.su3ds] [--max N] [--fit F] [--no-dither]");
+            eprintln!(
+                "usage: su3ds <input.sog|input.ply> [-o output.su3ds] [--max N] [--fit F] [--no-dither] [--preserve-quality] [--no-sh]"
+            );
             std::process::exit(2);
         }
     };
@@ -50,6 +52,8 @@ fn main() {
             "--flip-z" => options.flip_z = true,
             "--no-center" => options.no_center = true,
             "--no-dither" => options.no_dither = true,
+            "--preserve-quality" => options.preserve_quality = true,
+            "--no-sh" => options.keep_sh = false,
             other => {
                 eprintln!("unknown option: {other}");
                 std::process::exit(2);

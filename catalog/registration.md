@@ -7,8 +7,8 @@
 ## 登録前に必要なもの
 
 1. GitHub リポジトリ `Suzukeh/3DGS_Su` を公開する
-2. `python build_release.py --version v0.4.0` で `dist/3DGS_Su-v0.4.0.zip` を作る
-3. リリース `v0.4.0` を作り、その zip を添付する
+2. `python build_release.py --version v0.5.0` で `dist/3DGS_Su-v0.5.0.zip` を作る
+3. リリース `v0.5.0` を作り、その zip を添付する
 4. サムネイル `catalog/images/Suzuke.3DGS_Su_thumbnail.png` を用意する（206x206 PNG）
 5. 説明画像 `catalog/images/Suzuke.3DGS_Su_preview.png` を用意する（16:9 PNG）
 

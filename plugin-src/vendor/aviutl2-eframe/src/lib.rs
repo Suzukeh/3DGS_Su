@@ -1,0 +1,924 @@
+//! # aviutl2-eframe
+//!
+//! AviUtl2の汎用プラグインでegui/eframeを扱うためのライブラリ。
+//!
+//! ## Feature Flags
+//!
+//! - `default_fonts`（デフォルト）：eguiのデフォルトフォントを埋め込むかどうか。
+//!   無効にするとeguiにて使われている記号が表示されなくなる可能性があるので、通常は有効にしておくことを推奨します。
+//! - `transparent_keyboard_input`（デフォルト）：eguiがキーボード入力を要求していないときにAviUtl2にキーボードイベントを透過させるかどうか。
+//!
+//! ## Note
+//!
+//! aviutl2-rsをGitリポジトリで依存として指定する場合は`[patch]`セクションを使用してください。
+//! もし`aviutl2 = { git = "..." }`のように直接指定した場合、`aviutl2-eframe`クレートから
+//! 参照する`aviutl2`クレートと依存関係が分裂してしまい、特に[`aviutl2_visuals`]関数などで問題が発生します。
+mod key;
+
+use anyhow::Context;
+use aviutl2::{AnyResult, raw_window_handle, tracing};
+use eframe::EframeWinitApplication;
+use std::{num::NonZeroIsize, sync::mpsc};
+use windows::Win32::{
+    Foundation::{HWND, SetLastError},
+    UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GWL_STYLE, SetWindowLongPtrW, ShowWindow, WS_CLIPSIBLINGS, WS_POPUP,
+    },
+};
+use winit::{platform::windows::EventLoopBuilderExtWindows, raw_window_handle::HasWindowHandle};
+
+pub use eframe;
+pub use eframe::egui;
+
+/// eframeのウィンドウを表す構造体。
+///
+/// この構造体は、別スレッドで動作するegui/eframeウィンドウを管理します。
+/// ウィンドウのハンドル（HWND）やeguiのコンテキストへのアクセスを提供します。
+///
+/// # Note
+///
+/// eframeのデフォルトからいくつか変更が加えられています：
+/// - デフォルトのアプリデータの保存先は`DLLのあるディレクトリ/DLL名.data`になります。
+///   -
+/// - ウィンドウの装飾は無効化されています。
+///
+/// [`eframe::NativeOptions`]をカスタマイズしたい場合は、[`EframeWindow::new_with_options`]を使用してください。
+pub struct EframeWindow {
+    hwnd: std::sync::OnceLock<NonZeroIsize>,
+    egui_ctx: std::sync::OnceLock<egui::Context>,
+    #[expect(clippy::type_complexity)]
+    init_rx: std::sync::Mutex<
+        Option<
+            mpsc::Receiver<
+                Result<(isize, egui::Context), Box<dyn std::error::Error + Send + Sync>>,
+            >,
+        >,
+    >,
+    thread: Option<std::thread::JoinHandle<()>>,
+    thread_terminator: std::sync::Arc<std::sync::OnceLock<()>>,
+    event_loop_proxy:
+        std::sync::Arc<std::sync::OnceLock<winit::event_loop::EventLoopProxy<eframe::UserEvent>>>,
+    panic_message: std::sync::Arc<std::sync::OnceLock<String>>,
+}
+
+/// EframeWindowのウィンドウハンドル。
+///
+/// `EframeWindow::handle()` で取得できます。
+pub struct EframeWindowHandle {
+    hwnd: NonZeroIsize,
+}
+
+impl raw_window_handle::HasWindowHandle for EframeWindowHandle {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        let handle = raw_window_handle::Win32WindowHandle::new(self.hwnd);
+        Ok(unsafe {
+            raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Win32(
+                handle,
+            ))
+        })
+    }
+}
+
+struct WrappedApp {
+    hwnd: NonZeroIsize,
+    internal_app: Box<dyn eframe::App>,
+}
+
+impl eframe::App for WrappedApp {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.internal_app.ui(ui, frame);
+
+        if cfg!(feature = "transparent_keyboard_input") && !ui.egui_wants_keyboard_input() {
+            ui.input(|i| {
+                let parent_window = unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::GetParent(HWND(
+                        self.hwnd.get() as *mut std::ffi::c_void
+                    ))
+                };
+                let parent_window = match parent_window {
+                    Ok(parent_window) => parent_window,
+                    Err(e) => {
+                        tracing::warn!("Failed to get parent window for input handling: {:?}", e);
+
+                        return;
+                    }
+                };
+
+                for event in &i.events {
+                    let egui::Event::Key {
+                        key,
+                        physical_key,
+                        pressed,
+                        repeat: _,
+                        modifiers: _,
+                    } = event
+                    else {
+                        continue;
+                    };
+
+                    let message = if *pressed {
+                        windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN
+                    } else {
+                        windows::Win32::UI::WindowsAndMessaging::WM_KEYUP
+                    };
+                    let parent_thread_id = unsafe {
+                        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+                            parent_window,
+                            None,
+                        )
+                    };
+                    let keyboard_layout = (parent_thread_id != 0).then(|| unsafe {
+                        windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout(
+                            parent_thread_id,
+                        )
+                    });
+                    let Some(key_message) = key::egui_key_to_windows_key_message(
+                        *key,
+                        *physical_key,
+                        *pressed,
+                        keyboard_layout,
+                    ) else {
+                        continue;
+                    };
+                    tracing::trace!(
+                        concat!(
+                            "Forwarding key event to parent window: ",
+                            "key={:?}, physical_key={:?}, pressed={}, message=0x{:04X}"
+                        ),
+                        key,
+                        physical_key,
+                        pressed,
+                        message
+                    );
+
+                    unsafe {
+                        let res = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                            Some(parent_window),
+                            message,
+                            windows::Win32::Foundation::WPARAM(key_message.wparam),
+                            windows::Win32::Foundation::LPARAM(key_message.lparam),
+                        );
+                        if let Err(e) = res {
+                            tracing::warn!("Failed to post key event to parent window: {:?}", e);
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.internal_app.logic(ctx, frame);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.internal_app.save(storage);
+    }
+
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        self.internal_app.on_exit(gl);
+    }
+
+    fn auto_save_interval(&self) -> std::time::Duration {
+        self.internal_app.auto_save_interval()
+    }
+
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        self.internal_app.clear_color(visuals)
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        self.internal_app.persist_egui_memory()
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // なぜかフォーカスがされないので、クリックされたら強制的にフォーカスを当てる
+        // （こうしないとキーボードが使えない）
+        if !raw_input.focused {
+            let is_clicked = raw_input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::PointerButton { .. }));
+            if is_clicked {
+                tracing::trace!("Egui window clicked while unfocused, forcing focus");
+                let focus_result = unsafe {
+                    windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(HWND(
+                        self.hwnd.get() as *mut std::ffi::c_void,
+                    )))
+                };
+                match focus_result {
+                    Ok(_) => {
+                        tracing::trace!("SetFocus succeeded");
+                    }
+                    Err(e) => {
+                        tracing::warn!("SetFocus failed: {:?}", e);
+                    }
+                }
+            }
+
+            let current_focus = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() };
+            if (current_focus.0 as usize) == self.hwnd.get() as usize {
+                tracing::trace!("Egui window is now focused");
+                raw_input.focused = true;
+            }
+        }
+        self.internal_app.raw_input_hook(ctx, raw_input);
+    }
+}
+
+// # Note
+//
+// デフォルトのEframeWinitApplicationはAviUtl2のメインスレッドからの終了要求に対して終了しないため、
+// 一段階wrapして終了要求を処理するようにする。
+// （これによってActiveEventLoopへのアクセスが可能になり、exit()を呼び出せる）
+// 少なくとも2026/02/01現在、これで正常に動作しているので、まぁ...
+
+mod lifecycle;
+
+struct WinitEventLoopApp<'a> {
+    app: EframeWinitApplication<'a>,
+    thread_terminator: std::sync::Arc<std::sync::OnceLock<()>>,
+    native_window: std::sync::Arc<std::sync::atomic::AtomicIsize>,
+}
+impl<'a> WinitEventLoopApp<'a> {
+    fn should_forward_event(&self, event_loop: &winit::event_loop::ActiveEventLoop) -> bool {
+        // AviUtl2 may destroy a registered client HWND before plugin Drop.
+        // Never forward another repaint/viewport query for that dead native window.
+        let hwnd = self.native_window.load(std::sync::atomic::Ordering::Acquire);
+        let alive = hwnd == 0 || unsafe {
+            windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(HWND(hwnd as _))).as_bool()
+        };
+        lifecycle::should_forward_event(self.thread_terminator.get().is_some() || !alive, || {
+            tracing::debug!("Egui window thread exiting...");
+            event_loop.exit();
+        })
+    }
+}
+impl<'a> winit::application::ApplicationHandler<eframe::UserEvent> for WinitEventLoopApp<'a> {
+    fn new_events(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        cause: winit::event::StartCause,
+    ) {
+        if !self.should_forward_event(event_loop) { return; }
+        self.app.new_events(event_loop, cause);
+    }
+
+    fn user_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        event: eframe::UserEvent,
+    ) {
+        if !self.should_forward_event(event_loop) { return; }
+        self.app.user_event(event_loop, event);
+    }
+
+    fn device_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        if !self.should_forward_event(event_loop) { return; }
+        self.app.device_event(event_loop, device_id, event);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        if !self.should_forward_event(event_loop) { return; }
+        self.app.about_to_wait(event_loop);
+    }
+
+    fn suspended(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        if !self.should_forward_event(event_loop) { return; }
+        self.app.suspended(event_loop);
+    }
+
+    fn exiting(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        self.app.exiting(event_loop);
+    }
+
+    fn memory_warning(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        if !self.should_forward_event(event_loop) { return; }
+        self.app.memory_warning(event_loop);
+    }
+
+    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        if !self.should_forward_event(event_loop) { return; }
+        self.app.resumed(event_loop);
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        window_id: winit::window::WindowId,
+        event: winit::event::WindowEvent,
+    ) {
+        if !self.should_forward_event(event_loop) { return; }
+        self.app.window_event(event_loop, window_id, event);
+    }
+}
+
+/// デフォルトのeguiの永続化データを保存するパスを取得する。
+///
+/// デフォルトは`DLLのあるディレクトリ/DLL名.data/アプリ名.ron`に保存されます。
+/// また、もしこのパスが指定されているかつ、aviutl2-eframe
+/// 0.42.0以前のバージョンで保存されているデータが存在する場合、そのデータを自動的に移行します。
+pub fn default_persist_path(name: &str) -> std::path::PathBuf {
+    let path = process_path::get_dylib_path().expect("Should not fail on windows");
+
+    let dir = path.with_added_extension("data");
+    tracing::debug!("Eframe persistence path: {:?}", path);
+    let escaped_name = name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+    dir.join(&escaped_name).with_added_extension("ron")
+}
+
+impl EframeWindow {
+    /// 新しいEframeWindowを作成する。
+    ///
+    /// `app_creator`は`eframe::run_native`と同様のclosureです。
+    /// この関数はすぐに返り、ウィンドウの初期化はバックグラウンドで行われます。
+    /// ウィンドウハンドルが必要な場合は `handle()` を呼び出してください。
+    pub fn new<F>(name: &str, app_creator: F) -> AnyResult<Self>
+    where
+        F: 'static
+            + Send
+            + FnOnce(
+                &eframe::CreationContext<'_>,
+                AviUtl2EframeHandle,
+            )
+                -> Result<Box<dyn eframe::App>, Box<dyn std::error::Error + Send + Sync>>,
+    {
+        Self::new_with_options(name, |opts| opts, app_creator)
+    }
+
+    /// 新しいEframeWindowを作成する。
+    ///
+    /// [`Self::new`]と違い、`native_options_builder`を指定することで、`eframe::NativeOptions`をカスタマイズできます。
+    pub fn new_with_options<F, F2>(
+        name: &str,
+        native_options_builder: F,
+        app_creator: F2,
+    ) -> AnyResult<Self>
+    where
+        F: 'static + Send + FnOnce(eframe::NativeOptions) -> eframe::NativeOptions,
+        F2: 'static
+            + Send
+            + FnOnce(
+                &eframe::CreationContext<'_>,
+                AviUtl2EframeHandle,
+            )
+                -> Result<Box<dyn eframe::App>, Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let (tx, rx) = mpsc::channel::<
+            Result<(isize, egui::Context), Box<dyn std::error::Error + Send + Sync>>,
+        >();
+        let name = name.to_string();
+        let thread_terminator = std::sync::Arc::new(std::sync::OnceLock::new());
+        let event_loop_proxy = std::sync::Arc::new(std::sync::OnceLock::new());
+        let panic_message = std::sync::Arc::new(std::sync::OnceLock::<String>::new());
+        let thread = std::thread::spawn({
+            let thread_terminator = thread_terminator.clone();
+            let event_loop_proxy = event_loop_proxy.clone();
+            let panic_message = panic_message.clone();
+            move || {
+                // Painc hookはtracing等のロックを取得しないようにする。
+                // （tracing-subscriberなどとデッドロックしかねないため）
+                // メッセージはArcで共有し、Dropで安全にログに記録する。
+                std::panic::set_hook(Box::new(move |panic_info| {
+                    let msg = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "<unknown panic>".to_string()
+                    };
+
+                    let location = panic_info
+                        .location()
+                        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                        .unwrap_or_else(|| "<unknown location>".to_string());
+                    panic_message.set(format!("{msg} (at {location})")).ok();
+                }));
+                let native_window = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(0));
+                let default_persist_path = default_persist_path(&name);
+                let native_options = eframe::NativeOptions {
+                    viewport: egui::ViewportBuilder::default()
+                        .with_visible(false)
+                        .with_decorations(false)
+                        .with_taskbar(false)
+                        .with_icon(egui::IconData::default()),
+                    window_builder: Some(Box::new(|wb| {
+                        wb.with_visible(false).with_decorations(false)
+                    })),
+                    persist_window: false,
+                    persistence_path: Some(default_persist_path.clone()),
+                    ..Default::default()
+                };
+                let native_options = native_options_builder(native_options);
+
+                if native_options
+                    .persistence_path
+                    .as_ref()
+                    .is_some_and(|o| o == &default_persist_path)
+                    && !default_persist_path.exists()
+                {
+                    let app_id = native_options.viewport.app_id.as_ref().unwrap_or(&name);
+                    let legacy_persist_path = eframe::storage_dir(app_id)
+                        .expect("should be available on windows")
+                        .join("app.ron");
+                    if legacy_persist_path.exists() {
+                        tracing::debug!(
+                            "Legacy persistence file found at {:?}, copying to {:?}",
+                            legacy_persist_path,
+                            default_persist_path
+                        );
+                        if let Err(e) = std::fs::create_dir_all(
+                            default_persist_path
+                                .parent()
+                                .expect("should have parent directory"),
+                        ) {
+                            tracing::warn!(
+                                "Failed to create persistence directory {:?}: {:?}",
+                                default_persist_path.parent(),
+                                e
+                            );
+                        } else if let Err(e) =
+                            std::fs::copy(&legacy_persist_path, &default_persist_path)
+                        {
+                            tracing::warn!(
+                                "Failed to migrate legacy persistence file from {:?} to {:?}: {:?}",
+                                legacy_persist_path,
+                                default_persist_path,
+                                e
+                            );
+                        } else {
+                            tracing::debug!(
+                                "Successfully migrated legacy persistence file from {:?} to {:?}",
+                                legacy_persist_path,
+                                default_persist_path
+                            );
+                        }
+                    }
+                }
+
+                let event_loop =
+                    winit::event_loop::EventLoop::<eframe::UserEvent>::with_user_event()
+                        .with_any_thread(true)
+                        .build()
+                        .unwrap();
+                event_loop_proxy
+                    .set(event_loop.create_proxy())
+                    .expect("event loop proxy should only be initialized once");
+                event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+                let app = eframe::create_native(
+                    &name,
+                    native_options,
+                    Box::new(|cc| {
+                        use winit::platform::windows::WindowExtWindows as _;
+                        let window = cc.winit_window().expect("should not be headless");
+                        // NOTE: これがないと上に1pxの影ができる
+                        window.set_undecorated_shadow(false);
+
+                        let raw_window_handle::RawWindowHandle::Win32(hwnd) = cc
+                            .window_handle()
+                            .expect("Failed to get window handle")
+                            .as_raw()
+                        else {
+                            unreachable!("Not a Win32 window handle");
+                        };
+                        unsafe {
+                            // Set window styles
+                            let hwnd = hwnd.hwnd.get() as _;
+
+                            SetLastError(windows::Win32::Foundation::WIN32_ERROR(0));
+                            let _ = ShowWindow(
+                                HWND(hwnd),
+                                windows::Win32::UI::WindowsAndMessaging::SW_HIDE,
+                            );
+                            if windows::Win32::Foundation::GetLastError().0 != 0 {
+                                let err = windows::core::Error::from_thread();
+                                return Err(anyhow::anyhow!("Failed to hide window: {}", err)
+                                    .into_boxed_dyn_error());
+                            }
+
+                            SetLastError(windows::Win32::Foundation::WIN32_ERROR(0));
+                            let res_style = SetWindowLongPtrW(
+                                HWND(hwnd),
+                                GWL_STYLE,
+                                (WS_CLIPSIBLINGS.0 | WS_POPUP.0) as isize,
+                            );
+                            if res_style == 0 && windows::Win32::Foundation::GetLastError().0 != 0 {
+                                let err = windows::core::Error::from_thread();
+                                return Err(anyhow::anyhow!("Failed to set window style: {}", err)
+                                    .into_boxed_dyn_error());
+                            }
+
+                            SetLastError(windows::Win32::Foundation::WIN32_ERROR(0));
+                            let res_exstyle = SetWindowLongPtrW(HWND(hwnd), GWL_EXSTYLE, 0);
+                            if res_exstyle == 0 && windows::Win32::Foundation::GetLastError().0 != 0
+                            {
+                                let err = windows::core::Error::from_thread();
+                                return Err(anyhow::anyhow!(
+                                    "Failed to set window exstyle: {}",
+                                    err
+                                )
+                                .into_boxed_dyn_error());
+                            }
+                        }
+                        let app_handle = AviUtl2EframeHandle {
+                            hwnd: NonZeroIsize::new(hwnd.hwnd.get()).context("HWND is null")?,
+                        };
+                        native_window.store(hwnd.hwnd.get(), std::sync::atomic::Ordering::Release);
+                        let app = app_creator(cc, app_handle)?;
+                        tx.send(Ok((hwnd.hwnd.get(), cc.egui_ctx.clone())))
+                            .context("Failed to send HWND")?;
+                        tracing::debug!("Egui app created, with HWND: 0x{:016x}", hwnd.hwnd);
+                        Ok(Box::new(WrappedApp {
+                            hwnd: NonZeroIsize::new(hwnd.hwnd.get()).context("HWND is null")?,
+                            internal_app: app,
+                        }) as Box<dyn eframe::App>)
+                    }),
+                    &event_loop,
+                );
+
+                let mut egui_app = WinitEventLoopApp {
+                    app,
+                    thread_terminator,
+                    native_window: native_window.clone(),
+                };
+                let res = event_loop.run_app(&mut egui_app);
+                tracing::debug!("Egui event loop exited: {:?}", res);
+            }
+        });
+        Ok(Self {
+            hwnd: std::sync::OnceLock::new(),
+            egui_ctx: std::sync::OnceLock::new(),
+            init_rx: std::sync::Mutex::new(Some(rx)),
+            thread: Some(thread),
+            thread_terminator,
+            event_loop_proxy,
+            panic_message,
+        })
+    }
+
+    fn resolve_init(&self) -> AnyResult<()> {
+        if self.hwnd.get().is_some() {
+            return Ok(());
+        }
+        let rx = self.init_rx.lock().unwrap().take();
+        let Some(rx) = rx else {
+            while self.hwnd.get().is_none() {
+                std::thread::yield_now();
+            }
+            return Ok(());
+        };
+        let (hwnd, egui_ctx) = match rx.recv() {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(anyhow::anyhow!("Failed to create Egui app: {}", e)),
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to receive init data from Egui thread: {}",
+                    e
+                ));
+            }
+        };
+        let hwnd = NonZeroIsize::new(hwnd).context("Received null HWND from Egui thread")?;
+        self.hwnd.set(hwnd).ok();
+        self.egui_ctx.set(egui_ctx).ok();
+        Ok(())
+    }
+
+    /// ウィンドウハンドルを取得する。
+    ///
+    /// 初回呼び出し時にウィンドウの初期化が完了するまでブロックします。
+    pub fn handle(&self) -> AnyResult<EframeWindowHandle> {
+        self.resolve_init()?;
+        let hwnd = *self.hwnd.get().expect("hwnd set after resolve_init");
+        Ok(EframeWindowHandle { hwnd })
+    }
+
+    /// eguiのコンテキストを取得する。
+    ///
+    /// 初回呼び出し時にウィンドウの初期化が完了するまでブロックします。
+    pub fn egui_ctx(&self) -> AnyResult<egui::Context> {
+        self.resolve_init()?;
+        Ok(self
+            .egui_ctx
+            .get()
+            .expect("egui_ctx set after resolve_init")
+            .clone())
+    }
+}
+
+/// aviutl2-eframeでウィンドウ内から呼び出される関数のハンドル。
+pub struct AviUtl2EframeHandle {
+    hwnd: NonZeroIsize,
+}
+impl raw_window_handle::HasWindowHandle for AviUtl2EframeHandle {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        let handle = raw_window_handle::Win32WindowHandle::new(self.hwnd);
+        Ok(unsafe {
+            raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Win32(
+                handle,
+            ))
+        })
+    }
+}
+
+impl AviUtl2EframeHandle {
+    /// 親ウィンドウのコンテキストメニューを表示する。
+    ///
+    /// # Note
+    ///
+    /// 「ウィンドウ配置」メニューを表示するために使用します。
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use aviutl2_eframe::{AviUtl2EframeHandle, egui};
+    /// # struct YourAppStruct { handle: AviUtl2EframeHandle }
+    /// # impl YourAppStruct {
+    /// # fn ui(&self, ui: &mut egui::Ui) {
+    /// egui::Panel::top("toolbar").show(ui, |ui| {
+    ///     let clicked = ui
+    ///         .heading("My Plugin")
+    ///         .interact(egui::Sense::click());
+    ///     if clicked.secondary_clicked() {
+    ///         let _ = self.handle.show_context_menu();
+    ///     }
+    /// });
+    /// # }
+    /// # }
+    /// ```
+    pub fn show_context_menu(&self) -> AnyResult<()> {
+        let parent_window = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetParent(HWND(
+                self.hwnd.get() as *mut std::ffi::c_void
+            ))
+        }?;
+        unsafe {
+            let mut cursor_pos = windows::Win32::Foundation::POINT::default();
+            windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut cursor_pos)?;
+            windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                Some(parent_window),
+                windows::Win32::UI::WindowsAndMessaging::WM_CONTEXTMENU,
+                windows::Win32::Foundation::WPARAM(self.hwnd.get() as _),
+                windows::Win32::Foundation::LPARAM(makelparam(cursor_pos.x, cursor_pos.y) as _),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for EframeWindow {
+    fn drop(&mut self) {
+        // ウィンドウスレッドが終了するのを待つ
+        if let Some(thread) = self.thread.take() {
+            tracing::debug!("Terminating Egui window thread...");
+            self.thread_terminator.set(()).ok();
+            if let Some(proxy) = self.event_loop_proxy.get() {
+                proxy
+                    .send_event(eframe::UserEvent::RequestRepaint {
+                        viewport_id: egui::ViewportId::ROOT,
+                        when: std::time::Instant::now(),
+                        cumulative_pass_nr: 0,
+                    })
+                    .ok();
+            }
+            tracing::debug!("Waiting for Egui window thread to exit...");
+            if thread.join().is_err() {
+                let msg = self
+                    .panic_message
+                    .get()
+                    .map_or("<unknown panic>", String::as_str);
+                tracing::error!("Egui thread panicked: {}", msg);
+            } else {
+                tracing::debug!("Egui window thread exited successfully.");
+            }
+        }
+    }
+}
+
+/// AviUtl2のテーマに基づいたeguiのVisualsを取得する。
+///
+/// # Example
+///
+/// ```rust
+/// # use aviutl2_eframe::{self, eframe};
+/// # fn test(cc: &eframe::CreationContext<'_>) {
+/// cc.egui_ctx.all_styles_mut(|style| {
+///     style.visuals = aviutl2_eframe::aviutl2_visuals();
+/// });
+/// # }
+/// ```
+pub fn aviutl2_visuals() -> eframe::egui::Visuals {
+    let mut visuals = eframe::egui::Visuals::dark();
+
+    let background = load_color("Background");
+    let window_border = load_color("WindowBorder");
+    let window_separator = load_color("WindowSeparator");
+    let grouping = load_color("Grouping");
+    let grouping_hover = load_color("GroupingHover");
+    let grouping_select = load_color("GroupingSelect");
+    let border = load_color("Border");
+    let border_focus = load_color("BorderFocus");
+    let border_select = load_color("BorderSelect");
+    let text = load_color("Text");
+    let text_disable = load_color("TextDisable");
+    let text_select = load_color("TextSelect");
+    let button_body = load_color("ButtonBody");
+    let button_body_hover = load_color("ButtonBodyHover");
+    let button_body_press = load_color("ButtonBodyPress");
+    let button_body_select = load_color("ButtonBodySelect");
+    let warn_color = load_color("LogWarn");
+    let error_color = load_color("LogError");
+
+    visuals.override_text_color = Some(text);
+    visuals.widgets.noninteractive.fg_stroke.color = text;
+    visuals.widgets.inactive.fg_stroke.color = text;
+    visuals.widgets.hovered.fg_stroke.color = text;
+    visuals.widgets.active.fg_stroke.color = text;
+    visuals.widgets.open.fg_stroke.color = text;
+    visuals.weak_text_color = Some(text_disable);
+    visuals.selection = egui::style::Selection {
+        bg_fill: text_select,
+        stroke: egui::Stroke::new(1.0, border_select),
+    };
+    visuals.window_fill = background;
+    visuals.panel_fill = background;
+    visuals.widgets.noninteractive.bg_fill = background;
+    visuals.widgets.noninteractive.weak_bg_fill = background;
+    visuals.window_stroke = egui::Stroke::new(1.0, window_border);
+    visuals.faint_bg_color = grouping;
+    visuals.extreme_bg_color = window_separator;
+    visuals.text_edit_bg_color = Some(grouping_hover);
+    visuals.code_bg_color = grouping_select;
+    visuals.warn_fg_color = warn_color;
+    visuals.error_fg_color = error_color;
+
+    visuals.widgets.noninteractive.bg_stroke.color = border;
+    visuals.widgets.inactive.bg_stroke.color = border;
+    visuals.widgets.hovered.bg_stroke.color = border_focus;
+    visuals.widgets.active.bg_stroke.color = border_select;
+    visuals.widgets.open.bg_stroke.color = border_select;
+
+    visuals.widgets.inactive.bg_fill = button_body;
+    visuals.widgets.inactive.weak_bg_fill = button_body;
+    visuals.widgets.hovered.bg_fill = button_body_hover;
+    visuals.widgets.hovered.weak_bg_fill = button_body_hover;
+    visuals.widgets.active.bg_fill = button_body_press;
+    visuals.widgets.active.weak_bg_fill = button_body_press;
+    visuals.widgets.open.bg_fill = button_body_select;
+    visuals.widgets.open.weak_bg_fill = button_body_select;
+
+    visuals
+}
+
+/// AviUtl2で指定されているフォントからeguiのFontDefinitionsを作成する。
+///
+/// # Example
+///
+/// ```rust
+/// # use aviutl2_eframe::{self, eframe};
+/// # fn test(cc: &eframe::CreationContext<'_>) {
+/// cc.egui_ctx.set_fonts(aviutl2_eframe::aviutl2_fonts());
+/// # }
+/// ```
+pub fn aviutl2_fonts() -> eframe::egui::FontDefinitions {
+    let mut fonts = eframe::egui::FontDefinitions::default();
+
+    // NOTE: だいぶ重い処理を行っているが、まぁプラグイン毎に１回程度なのでまぁ...
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    db.load_fonts_dir(aviutl2::config::app_data_path().join("Font"));
+
+    // NOTE: フォント名を大文字小文字区別無しでマッチさせたいが、fontdbのやる気が無さそうなので
+    // 自前で大文字小文字区別無しから大文字小文字を合わせたマップを作る。
+    // 大文字小文字違いで複数のフォントが存在する場合は壊れるけど、まぁそんなユーザーなんていない...よね？
+    // ref: https://github.com/RazrFalcon/fontdb/issues/42
+    let mut insensitive_font_match = std::collections::HashMap::new();
+    for face in db.faces() {
+        let Some(primary_family_name) = face.families.first().map(|(family, _)| family.to_owned())
+        else {
+            continue;
+        };
+        for (family, _language) in &face.families {
+            insensitive_font_match.insert(family.to_lowercase(), primary_family_name.clone());
+        }
+    }
+
+    let control_font = aviutl2::config::get_font_info("Control")
+        .expect("Unreachable: key does not contain null byte");
+    let text_font = aviutl2::config::get_font_info("EditControl")
+        .expect("Unreachable: key does not contain null byte");
+
+    // フォールバックとしてYu Gothic UIを使う。
+    // （Yu Gothic UIはハードコードされてる）
+    if let Some(default_font) = db.query(&fontdb::Query {
+        families: &[fontdb::Family::Name("Yu Gothic UI")],
+        ..Default::default()
+    }) {
+        db.with_face_data(default_font, |data, _| {
+            static FALLBACK_FONT: &str = "aviutl2::Fallback";
+            let mut font_data = egui::FontData::from_owned(data.to_vec());
+            // Yu Gothic UIは体感上にずれているので、微調整する
+            font_data.tweak = egui::FontTweak {
+                y_offset_factor: 0.2,
+                ..Default::default()
+            };
+            fonts
+                .font_data
+                .insert(FALLBACK_FONT.to_string(), std::sync::Arc::new(font_data));
+            fonts
+                .families
+                .entry(eframe::egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, FALLBACK_FONT.to_string());
+            fonts
+                .families
+                .entry(eframe::egui::FontFamily::Monospace)
+                .or_default()
+                .insert(0, FALLBACK_FONT.to_string());
+        });
+    } else {
+        tracing::warn!("Failed to load fallback font 'Yu Gothic UI'");
+    }
+
+    if let Some(control_font_id) = insensitive_font_match
+        .get(&control_font.name.to_lowercase())
+        .and_then(|name| {
+            db.query(&fontdb::Query {
+                families: &[fontdb::Family::Name(name)],
+                ..Default::default()
+            })
+        })
+    {
+        db.with_face_data(control_font_id, |data, _| {
+            let mut font_data = egui::FontData::from_owned(data.to_vec());
+            // Yu Gothic UIは体感上にずれているので、微調整する
+            if control_font.name == "Yu Gothic UI" {
+                font_data.tweak = egui::FontTweak {
+                    y_offset_factor: 0.2,
+                    ..Default::default()
+                };
+            }
+            fonts.font_data.insert(
+                "aviutl2::Control".to_string(),
+                std::sync::Arc::new(font_data),
+            );
+            fonts
+                .families
+                .entry(eframe::egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, "aviutl2::Control".to_string());
+        });
+    } else {
+        tracing::warn!(
+            "Failed to load control font '{}', falling back to default",
+            control_font.name
+        );
+    }
+    if let Some(monospace_font) = insensitive_font_match
+        .get(&text_font.name.to_lowercase())
+        .and_then(|name| {
+            db.query(&fontdb::Query {
+                families: &[fontdb::Family::Name(name)],
+                ..Default::default()
+            })
+        })
+    {
+        db.with_face_data(monospace_font, |data, _| {
+            fonts.font_data.insert(
+                "aviutl2::EditControl".to_string(),
+                std::sync::Arc::new(egui::FontData::from_owned(data.to_vec())),
+            );
+            fonts
+                .families
+                .entry(eframe::egui::FontFamily::Monospace)
+                .or_default()
+                .insert(0, "aviutl2::EditControl".to_string());
+        });
+    } else {
+        tracing::warn!(
+            "Failed to load edit control font '{}', falling back to default",
+            text_font.name
+        );
+    }
+
+    fonts
+}
+
+fn load_color(key: &str) -> egui::Color32 {
+    let (r, g, b) = aviutl2::config::get_color_code(key)
+        .expect("Key contains null byte")
+        .expect("unreachable: default theme key missing");
+    egui::Color32::from_rgb(r, g, b)
+}
+#[inline]
+fn makelparam(low: i32, high: i32) -> isize {
+    ((high as isize) << 16) | ((low as isize) & 0xFFFF)
+}

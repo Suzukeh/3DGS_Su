@@ -7,3 +7,4 @@
 *.aux2 binary
 *.zip binary
 *.py linguist-vendored
+plugin-src/vendor/** linguist-vendored

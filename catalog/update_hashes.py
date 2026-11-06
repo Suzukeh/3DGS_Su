@@ -30,7 +30,11 @@ def path_for(catalog_path: str) -> Path:
 
 def main() -> None:
     entry = json.loads(CATALOG.read_text(encoding="utf-8"))
-    for version in entry["version"]:
+    versions = [v for v in entry["version"] if v["version"] == entry["latest-version"]]
+    if len(versions) != 1:
+        raise SystemExit("latest-version に一致する版は1件だけ必要です")
+    # 過去版は、その版を配布した当時のハッシュを保持する。
+    for version in versions:
         for file in version["file"]:
             path = path_for(file["path"])
             if not path.is_file():
