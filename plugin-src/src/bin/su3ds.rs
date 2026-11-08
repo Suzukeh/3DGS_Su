@@ -7,8 +7,30 @@
 use std::path::PathBuf;
 
 use three_dgs_converter_su::convert::{ConvertOptions, convert_file};
+use three_dgs_converter_su::settings::{QualityTemplate, Settings};
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--list-quality-templates") {
+        let entries: Vec<_> = QualityTemplate::ALL
+            .into_iter()
+            .map(|template| {
+                let mut settings = Settings::default();
+                settings.apply_quality_template(template);
+                serde_json::json!({
+                    "id": template.id(),
+                    "label": template.label(),
+                    "description": template.description(),
+                    "convert": settings.convert,
+                    "render_limit": settings.render.limit,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string(&entries).expect("serialize templates")
+        );
+        return;
+    }
     let mut args = std::env::args().skip(1);
     let input = match args.next() {
         Some(path) => PathBuf::from(path),

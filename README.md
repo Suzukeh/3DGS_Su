@@ -16,7 +16,8 @@
 
 - PLY / SOG を変換して、そのまま 3D 空間に表示
 - AviUtl2 のカメラ制御に追従
-- 品質優先モードで、追加の間引き・色と不透明度の量子化を避けて表示
+- プレビュー／バランス／品質保持の3種類の品質テンプレート
+- 品質保持では、追加の間引き・色と不透明度の量子化を避けて表示
 - 変換・向き・大きさ・表示設定をAviUtl2内の専用UIで操作。コマンド入力は不要
 - 通常合成と加算合成に対応
 - 360 度スキャン用のパノラマモード
@@ -38,22 +39,34 @@ AviUtl2 カタログで `3DGS_Su` を検索してインストールしてくだ�
 
 ## 使い方
 
-**軽量**と**品質優先（追加間引き・量子化なし）**を選べます。品質優先は処理時間とメモリを多く使います。元のビューアと完全に同じ画素になることを保証するモードではありません。
+**プレビュー（最大3万点）／バランス（最大15万点）／品質保持（全有効点・浮動小数点・SH）** から選べます。品質保持は処理時間とメモリを多く使います。元のビューアと完全に同じ画素になることを保証する設定ではありません。
 
 1. カスタムオブジェクトとして `3DGS_Su` を追加する
 2. `3DGS_Su` オブジェクトを選択する
 3. 専用ウィンドウの **ファイル参照...** で `.sog` または `.ply` を選ぶ
-4. 画質プリセットと必要な設定を選び、**変換して適用** を押す
+4. **品質テンプレート** と必要な設定を選び、**変換して適用** を押す
 5. 指定した出力先に `.su3ds` ができ、選択していたオブジェクトに設定される
 
 変換済みの `.su3ds` は **既存の .su3ds を適用...** から使えます。
-専用ウィンドウを閉じた場合は、**表示 → 3DGS変換**、
-またはオブジェクトの右クリックメニューから開き直せます。
+専用ウィンドウは **表示 → 3DGS変換** で開閉します。
+詳細設定は見出しをクリックして開きます。
 
 UIの詳しい操作、パラメータ、対応形式は
 [使い方](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/usage.md) を参照してください。
 
 ## 作例
+
+### 品質テンプレートの比較
+
+同じVanadiniteを、同じカメラ・表示設定で3DGS_Suから描画しています。
+
+<img src="https://raw.githubusercontent.com/Suzukeh/3DGS_Su/refs/heads/main/docs/quality-presets/overview.png" width="960" alt="プレビュー3万点、バランス15万点、品質保持936,246点の同一視点比較">
+
+> “Vanadinite” by Yann de Couëssin / Source: [scene/663d6a97](https://superspl.at/scene/663d6a97) / CC BY 4.0
+
+[細部の拡大・設定と容量の比較](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/quality-presets.md)
+
+### 動き・パノラマ
 
 Vanadinite と、360度スキャンの Infinity Octo Art MK を掲載しています。
 
@@ -63,6 +76,7 @@ Vanadinite と、360度スキャンの Infinity Octo Art MK を掲載してい�
 
 - [インストール](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/install.md)
 - [使い方・パラメータ・対応形式](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/usage.md)
+- [品質テンプレート・比較作例](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/quality-presets.md)
 - [.su3ds とは](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/su3ds.md)
 - [注意・制限](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/notes.md)
 - [作例](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/samples.md)

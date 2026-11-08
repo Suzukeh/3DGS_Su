@@ -12,13 +12,11 @@ pub(crate) use host::{apply_properties, capture_targets, current_epoch, read_pro
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use aviutl2::generic::GlobalEditHandle;
 use aviutl2::{AnyResult, generic::GenericPlugin};
 use aviutl2_eframe::EframeWindow;
 pub use convert::{ConvertInfo, ConvertOptions, convert_file};
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 const EFFECT: &str = "3DGS_Su";
 const ITEM: &str = "3DGSファイル(.su3ds)";
@@ -26,7 +24,6 @@ const PLUGIN_DIR: &str = "3DGSConverter_Su";
 const LAST_FILE: &str = "last_converted.txt";
 
 pub(crate) static EDIT_HANDLE: GlobalEditHandle = GlobalEditHandle::new();
-static WINDOW_HWND: OnceLock<isize> = OnceLock::new();
 
 #[aviutl2::plugin(GenericPlugin)]
 pub struct ThreeDgsConverterSu {
@@ -61,17 +58,6 @@ impl GenericPlugin for ThreeDgsConverterSu {
         if let Some(window) = &self.window {
             match window.handle() {
                 Ok(handle) => {
-                    if handle
-                        .window_handle()
-                        .ok()
-                        .and_then(|raw| match raw.as_raw() {
-                            RawWindowHandle::Win32(win32) => Some(win32.hwnd.get()),
-                            _ => None,
-                        })
-                        .is_some_and(|hwnd| WINDOW_HWND.set(hwnd).is_ok())
-                    {
-                        tracing::info!("3DGS変換ウィンドウを登録");
-                    }
                     if let Err(error) = registry.register_window_client("3DGS変換", &handle) {
                         tracing::error!("3DGS変換ウィンドウの登録に失敗: {error}");
                     }
@@ -79,9 +65,8 @@ impl GenericPlugin for ThreeDgsConverterSu {
                 Err(error) => tracing::error!("3DGS変換ウィンドウの初期化に失敗: {error}"),
             }
         }
-        registry.register_object_menu("3DGS変換...", show_window);
-        registry.register_edit_menu("3DGS変換...", show_window);
-        show_window();
+        // 配置・表示・ドッキングはAviUtl2の標準「表示」メニューに任せる。
+        // 子HWNDを独自に移動/拡大すると、ホストの他パネルを覆ってしまう。
         tracing::info!("3DGSConverter_Su UI registered");
     }
 
@@ -129,45 +114,6 @@ pub(crate) fn plugin_data_dir() -> PathBuf {
         })
 }
 
-/// 登録済みの専用UIを前面に出す。AviUtl2 のメニューから呼ばれる。
-pub(crate) fn show_window() {
-    capture_selection();
-    if let Some(hwnd) = WINDOW_HWND.get() {
-        // HWND は EframeWindow が生存している間だけ有効。
-        unsafe {
-            let handle = *hwnd as *mut std::ffi::c_void;
-            windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(
-                handle,
-                windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW,
-            );
-            let parent = windows_sys::Win32::UI::WindowsAndMessaging::GetParent(handle);
-            let mut client = windows_sys::Win32::Foundation::RECT {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            };
-            if !parent.is_null() {
-                windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(parent, &mut client);
-            }
-            let width = (client.right - 40).clamp(320, 900);
-            let height = (client.bottom - 60).clamp(240, 640);
-            let y = (client.bottom - height - 20).max(0);
-            windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPos(
-                handle,
-                std::ptr::null_mut(),
-                20,
-                y,
-                width,
-                height,
-                windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOZORDER
-                    | windows_sys::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW,
-            );
-            windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(handle);
-        }
-    }
-}
-
 pub(crate) fn last_file_path() -> Option<PathBuf> {
     fs::read_to_string(plugin_data_dir().join(LAST_FILE))
         .ok()
@@ -182,12 +128,6 @@ pub(crate) fn write_last_file(path: &Path) -> AnyResult<()> {
     }
     fs::write(&last, path.to_string_lossy().as_bytes())?;
     Ok(())
-}
-
-pub(crate) fn capture_selection() {
-    if let Err(error) = capture_targets() {
-        tracing::warn!("対象取得: {error}");
-    }
 }
 
 pub(crate) fn selected_count() -> AnyResult<usize> {

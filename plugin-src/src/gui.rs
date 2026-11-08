@@ -16,7 +16,9 @@ use aviutl2::generic::ObjectHandle;
 use aviutl2_eframe::{AviUtl2EframeHandle, eframe, egui};
 use native_dialog::FileDialogBuilder;
 
-use crate::settings::{BlendMode, FILE_ITEM, FitMode, QualityPreset, RENDER_LIMIT, Settings};
+use crate::settings::{
+    BlendMode, FILE_ITEM, FitMode, QualityPreset, QualityTemplate, RENDER_LIMIT, Settings,
+};
 use crate::{
     ConvertInfo, ConvertOptions, apply_properties, capture_targets, convert_file, current_epoch,
     last_file_path, pick_file, read_properties, selected_count, write_last_file,
@@ -56,6 +58,7 @@ struct PendingConversion {
     epoch: u64,
     quality: bool,
     auto_apply: bool,
+    apply_limit: Option<usize>,
     existing: Vec<PathBuf>,
 }
 
@@ -67,6 +70,7 @@ struct ConversionJob {
     output: PathBuf,
     quality: bool,
     auto_apply: bool,
+    apply_limit: Option<usize>,
 }
 
 impl ConversionJob {
@@ -79,6 +83,7 @@ impl ConversionJob {
             epoch,
             quality,
             auto_apply,
+            apply_limit,
             ..
         } = pending;
         let (sender, receiver) = mpsc::channel();
@@ -100,6 +105,7 @@ impl ConversionJob {
             output,
             quality,
             auto_apply,
+            apply_limit,
         })
     }
 
@@ -120,6 +126,24 @@ impl ConversionJob {
     }
 }
 
+fn conversion_apply_limit(settings: &Settings) -> Option<usize> {
+    if settings.convert.quality.is_quality() {
+        Some(0)
+    } else if settings.matched_quality_template().is_some() {
+        Some(settings.render.limit)
+    } else {
+        None
+    }
+}
+
+fn conversion_properties(path: &Path, render_limit: Option<usize>) -> Vec<(String, String)> {
+    let mut properties = vec![(FILE_ITEM.to_string(), path.to_string_lossy().into_owned())];
+    if let Some(limit) = render_limit {
+        properties.push((RENDER_LIMIT.to_string(), limit.to_string()));
+    }
+    properties
+}
+
 /// 変換UI。
 pub struct ConverterApp {
     handle: Option<AviUtl2EframeHandle>,
@@ -137,6 +161,8 @@ pub struct ConverterApp {
     started_at: Option<Instant>,
     last_info: Option<ConvertInfo>,
     last_applied: usize,
+    last_apply_limit: Option<usize>,
+    last_apply_path: Option<PathBuf>,
     #[cfg(feature = "selftest")]
     selftest: SelftestState,
 }
@@ -181,6 +207,8 @@ impl ConverterApp {
             started_at: None,
             last_info: None,
             last_applied: 0,
+            last_apply_limit: None,
+            last_apply_path: None,
             #[cfg(feature = "selftest")]
             selftest: SelftestState::default(),
         }
@@ -386,6 +414,7 @@ impl ConverterApp {
             epoch: current_epoch(),
             quality: self.settings.convert.quality.is_quality(),
             auto_apply: self.settings.auto_apply,
+            apply_limit: conversion_apply_limit(&self.settings),
             existing: existing_outputs(&output),
         };
         if pending.existing.is_empty() {
@@ -405,6 +434,8 @@ impl ConverterApp {
         self.output_auto = false;
         self.last_info = None;
         self.last_applied = 0;
+        self.last_apply_limit = None;
+        self.last_apply_path = None;
         match ConversionJob::start(pending) {
             Ok(job) => {
                 self.job = Some(job);
@@ -440,6 +471,7 @@ impl ConverterApp {
             output,
             quality,
             auto_apply,
+            apply_limit,
             ..
         } = job;
         let info = match result {
@@ -453,6 +485,8 @@ impl ConverterApp {
         let points_written = info.points_written;
         let elapsed_ms = info.elapsed_ms;
         self.last_info = Some(info);
+        self.last_apply_limit = apply_limit;
+        self.last_apply_path = Some(output.clone());
 
         let mut note = String::new();
         if self.handle.is_some()
@@ -470,17 +504,17 @@ impl ConverterApp {
                 status = StatusKind::Error;
                 note.push_str(" / 選択中の 3DGS_Su がありません");
             } else {
-                let mut properties =
-                    vec![(FILE_ITEM.to_string(), output.to_string_lossy().into_owned())];
-                if quality {
-                    properties.push((RENDER_LIMIT.to_string(), "0".to_string()));
-                }
+                let properties = conversion_properties(&output, apply_limit);
                 match apply_properties(targets, properties) {
                     Ok(count) if count > 0 => {
                         applied = count;
                         if quality {
-                            self.settings.render.limit = 0;
+                            if let Some(limit) = apply_limit {
+                                self.settings.render.limit = limit;
+                            }
                             note.push_str(&format!(" / {count} 件に適用（高品質: 表示上限=0）"));
+                        } else if let Some(limit) = apply_limit {
+                            note.push_str(&format!(" / {count} 件に適用（表示上限={limit}）"));
                         } else {
                             note.push_str(&format!(" / {count} 件に適用"));
                         }
@@ -506,6 +540,10 @@ impl ConverterApp {
     }
 
     fn apply_path(&mut self, path: &Path) {
+        self.apply_path_with_limit(path, None);
+    }
+
+    fn apply_path_with_limit(&mut self, path: &Path, render_limit: Option<usize>) {
         if self.job.is_some() {
             self.set_status(StatusKind::Busy, "変換の完了後に適用してください。");
             return;
@@ -527,8 +565,7 @@ impl ConverterApp {
             );
             return;
         }
-        let value = path.to_string_lossy().into_owned();
-        match apply_properties(targets, vec![(FILE_ITEM.to_string(), value)]) {
+        match apply_properties(targets, conversion_properties(path, render_limit)) {
             Ok(0) => {
                 self.set_status(
                     StatusKind::Error,
@@ -538,6 +575,9 @@ impl ConverterApp {
             Ok(count) => {
                 self.output = path.to_string_lossy().into_owned();
                 self.output_auto = false;
+                if let Some(limit) = render_limit {
+                    self.settings.render.limit = limit;
+                }
                 self.last_applied = count;
                 if let Err(error) = write_last_file(path) {
                     self.set_status(
@@ -566,9 +606,16 @@ impl ConverterApp {
 
     fn apply_last(&mut self) {
         match last_file_path().filter(|path| path.is_file()) {
-            Some(path) => self.apply_path(&path),
+            Some(path) => self.apply_path_with_limit(&path, self.last_conversion_limit(&path)),
             None => self.set_status(StatusKind::Error, "直前の変換結果がありません。"),
         }
+    }
+
+    fn last_conversion_limit(&self, path: &Path) -> Option<usize> {
+        self.last_apply_path
+            .as_deref()
+            .filter(|result| *result == path)
+            .and(self.last_apply_limit)
     }
 
     fn read_render_settings(&mut self) {
@@ -820,98 +867,142 @@ impl ConverterApp {
     fn draw_conversion_settings(&mut self, ui: &mut egui::Ui) {
         ui.group(|ui| {
             ui.strong("画質");
-            for preset in QualityPreset::ALL {
-                if ui.radio_value(&mut self.settings.convert.quality, preset, preset.label()).changed() && preset.is_quality() {
-                    self.settings.convert.keep_sh = true;
-                }
+            let current_template = self.settings.matched_quality_template();
+            let mut selected_template = current_template;
+            let mut requested_template = None;
+            egui::ComboBox::from_label("品質テンプレート")
+                .selected_text(
+                    current_template
+                        .map(QualityTemplate::label)
+                        .unwrap_or("カスタム"),
+                )
+                .show_ui(ui, |ui| {
+                    for template in QualityTemplate::ALL {
+                        if ui
+                            .selectable_value(
+                                &mut selected_template,
+                                Some(template),
+                                template.label(),
+                            )
+                            .clicked()
+                        {
+                            requested_template = Some(template);
+                        }
+                    }
+                });
+            if let Some(template) = requested_template {
+                self.settings.apply_quality_template(template);
             }
-            if self.settings.convert.quality.is_quality() {
-                ui.colored_label(egui::Color32::from_rgb(230, 170, 90), QUALITY_WARNING);
-                ui.small("品質優先では点数上限・ディザ設定を無視し、全点を保持します。SHは既定でオンです。");
+            if let Some(template) = self.settings.matched_quality_template() {
+                ui.small(template.description());
             }
-
-            ui.add_space(4.0);
             let quality = self.settings.convert.quality.is_quality();
             if quality {
-                let mut forced_all = true;
-                ui.add_enabled(
-                    false,
-                    egui::Checkbox::new(&mut forced_all, "全点を使う（品質優先では固定）"),
-                );
-            } else {
-                ui.checkbox(
-                    &mut self.settings.convert.all_points,
-                    "全点を使う（点数上限なし）",
-                );
+                ui.colored_label(egui::Color32::from_rgb(230, 170, 90), QUALITY_WARNING);
             }
-            let custom_max = !quality && !self.settings.convert.all_points;
-            ui.add_enabled_ui(custom_max, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("点数上限");
-                    ui.add(
-                        egui::DragValue::new(&mut self.settings.convert.max_points)
-                            .range(0..=usize::MAX)
-                            .speed(100.0)
-                            .suffix(" 点"),
-                    );
-                    ui.small("0でも全点。500,000点の上限はありません。");
-                });
-            });
 
-            ui.separator();
-            ui.strong("配置");
-            ui.radio_value(
-                &mut self.settings.convert.fit_mode,
-                FitMode::Normalized,
-                FitMode::Normalized.label(),
-            );
-            let normalized = self.settings.convert.fit_mode == FitMode::Normalized;
-            ui.add_enabled_ui(normalized, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("最大辺");
-                    ui.add(
-                        egui::DragValue::new(&mut self.settings.convert.fit_size)
-                            .range(1.0..=1_000_000.0)
-                            .speed(1.0),
-                    );
-                    ui.small("シーンの最大辺をこの値に合わせます。");
-                });
-            });
-            ui.radio_value(
-                &mut self.settings.convert.fit_mode,
-                FitMode::Original,
-                FitMode::Original.label(),
-            );
-            ui.horizontal_wrapped(|ui| {
-                ui.label("スケール");
-                ui.add(
-                    egui::DragValue::new(&mut self.settings.convert.scale)
-                        .range(0.001..=1_000.0)
-                        .speed(0.01),
-                );
-                ui.checkbox(&mut self.settings.convert.center, "中心を原点に合わせる");
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut self.settings.convert.flip_y, "Y反転");
-                ui.checkbox(&mut self.settings.convert.flip_z, "Z反転");
-            });
+            egui::CollapsingHeader::new("変換の詳細設定")
+                .default_open(false)
+                .id_salt("3dgs_conversion_details_collapsed_v2")
+                .show(ui, |ui| {
+                    ui.strong("変換形式（手動）");
+                    for preset in QualityPreset::ALL {
+                        if ui
+                            .radio_value(&mut self.settings.convert.quality, preset, preset.label())
+                            .changed()
+                            && preset.is_quality()
+                        {
+                            self.settings.convert.keep_sh = true;
+                        }
+                    }
+                    let quality = self.settings.convert.quality.is_quality();
+                    ui.separator();
+                    if quality {
+                        ui.small("品質優先では点数上限・ディザ設定を無視し、全点を保持します。SHは既定でオンです。");
+                    }
 
-            ui.separator();
-            ui.strong("色と球面調和");
-            if quality {
-                let mut no_dither = false;
-                ui.add_enabled(
-                    false,
-                    egui::Checkbox::new(&mut no_dither, "ディザ（品質優先ではオフ）"),
-                );
-                ui.checkbox(&mut self.settings.convert.keep_sh, "SH（視点依存の色）を保持");
-                if !self.settings.convert.keep_sh {
-                    ui.colored_label(egui::Color32::YELLOW, "SHを省略します。視点依存の色は保持されません。");
-                }
-            } else {
-                ui.checkbox(&mut self.settings.convert.dither, "ディザ");
-                ui.small("軽量モードはDC色のみです。SHを保持するには品質優先を選んでください。");
-            }
+                    ui.add_space(4.0);
+                    if quality {
+                        let mut forced_all = true;
+                        ui.add_enabled(
+                            false,
+                            egui::Checkbox::new(&mut forced_all, "全点を使う（品質優先では固定）"),
+                        );
+                    } else {
+                        ui.checkbox(
+                            &mut self.settings.convert.all_points,
+                            "全点を使う（点数上限なし）",
+                        );
+                    }
+                    let custom_max = !quality && !self.settings.convert.all_points;
+                    ui.add_enabled_ui(custom_max, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("点数上限");
+                            ui.add(
+                                egui::DragValue::new(&mut self.settings.convert.max_points)
+                                    .range(0..=usize::MAX)
+                                    .speed(100.0)
+                                    .suffix(" 点"),
+                            );
+                            ui.small("0でも全点。500,000点の上限はありません。");
+                        });
+                    });
+
+                    ui.separator();
+                    ui.strong("配置");
+                    ui.radio_value(
+                        &mut self.settings.convert.fit_mode,
+                        FitMode::Normalized,
+                        FitMode::Normalized.label(),
+                    );
+                    let normalized = self.settings.convert.fit_mode == FitMode::Normalized;
+                    ui.add_enabled_ui(normalized, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("最大辺");
+                            ui.add(
+                                egui::DragValue::new(&mut self.settings.convert.fit_size)
+                                    .range(1.0..=1_000_000.0)
+                                    .speed(1.0),
+                            );
+                            ui.small("シーンの最大辺をこの値に合わせます。");
+                        });
+                    });
+                    ui.radio_value(
+                        &mut self.settings.convert.fit_mode,
+                        FitMode::Original,
+                        FitMode::Original.label(),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("スケール");
+                        ui.add(
+                            egui::DragValue::new(&mut self.settings.convert.scale)
+                                .range(0.001..=1_000.0)
+                                .speed(0.01),
+                        );
+                        ui.checkbox(&mut self.settings.convert.center, "中心を原点に合わせる");
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.checkbox(&mut self.settings.convert.flip_y, "Y反転");
+                        ui.checkbox(&mut self.settings.convert.flip_z, "Z反転");
+                    });
+
+                    ui.separator();
+                    ui.strong("色と球面調和");
+                    if quality {
+                        let mut no_dither = false;
+                        ui.add_enabled(
+                            false,
+                            egui::Checkbox::new(&mut no_dither, "ディザ（品質優先ではオフ）"),
+                        );
+                        ui.checkbox(&mut self.settings.convert.keep_sh, "SH（視点依存の色）を保持");
+                        if !self.settings.convert.keep_sh {
+                            ui.colored_label(egui::Color32::YELLOW, "SHを省略します。視点依存の色は保持されません。");
+                        }
+                    } else {
+                        ui.checkbox(&mut self.settings.convert.dither, "ディザ");
+                        ui.small("軽量モードはDC色のみです。SHを保持するには品質優先を選んでください。");
+                    }
+                });
         });
     }
 
@@ -942,8 +1033,11 @@ impl ConverterApp {
     }
 
     fn draw_render_settings(&mut self, ui: &mut egui::Ui) {
+        // 旧バージョンで「開」として保存されたIDの影響を受けないよう、
+        // 既定閉の新しい id_salt を使う。
         egui::CollapsingHeader::new("表示設定（選択中の3DGS_Su）")
-            .default_open(true)
+            .default_open(false)
+            .id_salt("3dgs_render_settings_collapsed_v2")
             .show(ui, |ui| {
                 ui.small(
                     "変更は「選択中へ適用」を押したときだけ反映され、アニメーションを保持します。",
@@ -1175,6 +1269,7 @@ impl ConverterApp {
                     epoch: current_epoch(),
                     quality: self.settings.convert.quality.is_quality(),
                     auto_apply: self.settings.auto_apply,
+                    apply_limit: conversion_apply_limit(&self.settings),
                     existing: Vec::new(),
                 };
                 self.begin_conversion(pending);

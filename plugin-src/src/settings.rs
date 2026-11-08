@@ -56,6 +56,46 @@ impl QualityPreset {
     }
 }
 
+/// UIとCLIで共有する変換テンプレート。識別子と設定値を一元管理する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QualityTemplate {
+    Preview,
+    Balanced,
+    Preserve,
+}
+
+impl QualityTemplate {
+    pub const ALL: [Self; 3] = [Self::Preview, Self::Balanced, Self::Preserve];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Preview => "preview",
+            Self::Balanced => "balanced",
+            Self::Preserve => "preserve",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Preview => "プレビュー",
+            Self::Balanced => "バランス",
+            Self::Preserve => "品質保持",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Preview => "最大30,000点。RGBは512色、不透明度は8段階に量子化。SHは省略します。",
+            Self::Balanced => {
+                "最大150,000点。RGBは512色、不透明度は8段階に量子化。SHは省略します。"
+            }
+            Self::Preserve => {
+                "全有効点を保持。浮動小数点RGB/alphaとSHを保持します。処理が遅く、元画像と見た目が一致する保証はありません。"
+            }
+        }
+    }
+}
+
 /// 位置の正規化方法。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -293,6 +333,58 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// テンプレートが変換・表示設定に反映される項目だけを更新する。
+    pub fn apply_quality_template(&mut self, template: QualityTemplate) {
+        self.convert.quality = match template {
+            QualityTemplate::Preview | QualityTemplate::Balanced => QualityPreset::Lightweight,
+            QualityTemplate::Preserve => QualityPreset::Quality,
+        };
+        match template {
+            QualityTemplate::Preview => {
+                self.convert.max_points = 30_000;
+                self.convert.all_points = false;
+                self.convert.dither = true;
+                self.convert.keep_sh = false;
+            }
+            QualityTemplate::Balanced => {
+                self.convert.max_points = 150_000;
+                self.convert.all_points = false;
+                self.convert.dither = true;
+                self.convert.keep_sh = false;
+            }
+            QualityTemplate::Preserve => {
+                self.convert.max_points = 0;
+                self.convert.all_points = true;
+                self.convert.dither = false;
+                self.convert.keep_sh = true;
+            }
+        }
+        self.render.limit = 0;
+    }
+
+    /// 現在の有効設定に一致するテンプレート。個別の配置や表示項目は判定しない。
+    pub fn matched_quality_template(&self) -> Option<QualityTemplate> {
+        let convert = &self.convert;
+        if convert.quality.is_quality() {
+            return (convert.keep_sh && self.render.limit == 0)
+                .then_some(QualityTemplate::Preserve);
+        }
+        if !convert.dither {
+            return None;
+        }
+        let effective_max = convert.effective_max();
+        [QualityTemplate::Preview, QualityTemplate::Balanced]
+            .into_iter()
+            .find(|template| {
+                let max = match template {
+                    QualityTemplate::Preview => 30_000,
+                    QualityTemplate::Balanced => 150_000,
+                    QualityTemplate::Preserve => unreachable!(),
+                };
+                effective_max == max && (self.render.limit == 0 || self.render.limit >= max)
+            })
+    }
+
     /// 保存先ディレクトリ。`THREEDGS_SETTINGS_DIR` があればそれを優先する。
     pub fn settings_dir() -> PathBuf {
         if let Some(path) = env::var_os(SETTINGS_DIR_ENV) {

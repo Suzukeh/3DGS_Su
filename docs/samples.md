@@ -2,6 +2,18 @@
 
 [READMEへ戻る](../README.md)
 
+## 品質テンプレートの比較
+
+同じVanadiniteを、同じカメラ・表示設定で3DGS_Suから描画した比較です。
+
+<img src="quality-presets/overview.png" width="960" alt="プレビュー、バランス、品質保持の比較">
+
+<img src="quality-presets/detail.png" width="960" alt="同じ範囲を補間なしで拡大した品質比較">
+
+“Vanadinite” by Yann de Couëssin / Source: [scene/663d6a97](https://superspl.at/scene/663d6a97) / CC BY 4.0
+
+[テンプレートの設定・点数と容量・原寸PNG](quality-presets.md)
+
 ## Vanadinite
 
 <img src="vanadinite.gif" width="640" alt="Vanadinite のターンテーブル">

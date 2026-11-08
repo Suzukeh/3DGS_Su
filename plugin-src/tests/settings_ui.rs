@@ -5,12 +5,13 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 use aviutl2_eframe::egui;
 use three_dgs_converter_su::gui::{ConverterApp, existing_outputs, normalized_su3ds_path};
 use three_dgs_converter_su::settings::{
-    BlendMode, ConvertSettings, FitMode, QualityPreset, RENDER_ALPHA, RENDER_BLEND, RENDER_LIMIT,
-    RENDER_SIZE, RenderSettings, Settings, format_number,
+    BlendMode, ConvertSettings, FitMode, QualityPreset, QualityTemplate, RENDER_ALPHA,
+    RENDER_BLEND, RENDER_LIMIT, RENDER_SIZE, RenderSettings, Settings, format_number,
 };
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -239,4 +240,428 @@ fn headless_draw_smoke_does_not_need_aviutl() {
     assert_eq!(app.settings().convert.quality, QualityPreset::Quality);
     assert_eq!(app.settings().render.limit, 0);
     assert!(!app.is_busy());
+}
+
+fn rendered_text(output: &egui::FullOutput, target: &str) -> (String, Option<egui::Pos2>) {
+    fn collect(
+        shape: &egui::Shape,
+        all: &mut String,
+        target: &str,
+        target_pos: &mut Option<egui::Pos2>,
+    ) {
+        match shape {
+            egui::Shape::Text(text) => {
+                let value = text.galley.job.text.as_str();
+                all.push_str(value);
+                all.push('\n');
+                if value == target {
+                    *target_pos = Some(text.pos);
+                }
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, all, target, target_pos);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut all = String::new();
+    let mut target_pos = None;
+    for clipped in &output.shapes {
+        collect(&clipped.shape, &mut all, target, &mut target_pos);
+    }
+    (all, target_pos)
+}
+
+fn render(context: &egui::Context, app: &mut ConverterApp) -> egui::FullOutput {
+    context.run_ui(egui::RawInput::default(), |ui| app.draw(ui))
+}
+
+fn click(context: &egui::Context, app: &mut ConverterApp, pos: egui::Pos2) {
+    for pressed in [true, false] {
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::PointerMoved(pos));
+        input.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = context.run_ui(input, |ui| app.draw(ui));
+    }
+    let _ = render(context, app);
+}
+
+#[test]
+fn conversion_details_are_collapsed_in_actual_headless_render() {
+    let context = egui::Context::default();
+    let mut app = ConverterApp::headless();
+    app.settings_mut().convert.quality = QualityPreset::Quality;
+    let output = render(&context, &mut app);
+    let (text, _) = rendered_text(&output, "変換の詳細設定");
+
+    assert!(
+        text.contains("画質"),
+        "画質プリセットが常時表示されていません"
+    );
+    assert!(text.contains("変換の詳細設定"));
+    assert!(text.contains("品質優先は処理が遅くなります"));
+    assert!(text.contains("表示設定（選択中の3DGS_Su）"));
+
+    for hidden in [
+        "点数上限",
+        "最大辺",
+        "中心を原点に合わせる",
+        "Y反転",
+        "ディザ",
+        "SH（視点依存の色）を保持",
+        "選択中へ適用",
+    ] {
+        assert!(
+            !text.contains(hidden),
+            "折りたたみ内の {hidden} が初期表示されています"
+        );
+    }
+}
+
+#[test]
+fn opening_conversion_details_shows_controls_in_headless_render() {
+    let context = egui::Context::default();
+    let mut app = ConverterApp::headless();
+    let output = render(&context, &mut app);
+    let (_, header_pos) = rendered_text(&output, "変換の詳細設定");
+    let header_pos = header_pos.expect("変換の詳細設定ヘッダーが描画されていません");
+    click(&context, &mut app, header_pos + egui::vec2(2.0, 2.0));
+
+    let output = render(&context, &mut app);
+    let (text, _) = rendered_text(&output, "変換の詳細設定");
+    for visible in [
+        "変換形式（手動）",
+        "点数上限",
+        "最大辺",
+        "全点を使う（点数上限なし）",
+    ] {
+        assert!(
+            text.contains(visible),
+            "詳細を開いても {visible} が描画されていません"
+        );
+    }
+
+    let (_, checkbox_pos) = rendered_text(&output, "全点を使う（点数上限なし）");
+    let checkbox_pos = checkbox_pos.expect("全点チェックボックスが描画されていません");
+    click(&context, &mut app, checkbox_pos + egui::vec2(2.0, 2.0));
+    assert!(
+        app.settings().convert.all_points,
+        "開いた詳細設定のチェックボックスを操作できません"
+    );
+}
+
+#[test]
+fn opening_render_settings_shows_apply_controls() {
+    let context = egui::Context::default();
+    let mut app = ConverterApp::headless();
+    let output = render(&context, &mut app);
+    let (_, pos) = rendered_text(&output, "表示設定（選択中の3DGS_Su）");
+    click(
+        &context,
+        &mut app,
+        pos.expect("表示設定ヘッダーがありません") + egui::vec2(2.0, 2.0),
+    );
+    let output = render(&context, &mut app);
+    let (text, _) = rendered_text(&output, "表示設定（選択中の3DGS_Su）");
+    for label in [
+        "選択中から読込",
+        "選択中へ適用",
+        "手前クリップ",
+        "表示上限（0=全点）",
+    ] {
+        assert!(
+            text.contains(label),
+            "表示設定を開いても {label} がありません"
+        );
+    }
+}
+
+#[test]
+fn quality_templates_apply_contract_without_touching_unrelated_settings() {
+    let mut base = Settings {
+        auto_apply: false,
+        ..Default::default()
+    };
+    base.convert.fit_mode = FitMode::Original;
+    base.convert.fit_size = 123.5;
+    base.convert.scale = 2.5;
+    base.convert.center = false;
+    base.convert.flip_y = true;
+    base.convert.flip_z = true;
+    base.render.size = 1.7;
+    base.render.alpha = 0.4;
+    base.render.near = 4.5;
+    base.render.sort = false;
+    base.render.ellipse = false;
+    base.render.panorama = true;
+    base.render.fov = 88.0;
+    base.render.blend = BlendMode::Additive;
+
+    for template in QualityTemplate::ALL {
+        let mut settings = base.clone();
+        settings.apply_quality_template(template);
+        assert_eq!(
+            settings.matched_quality_template(),
+            Some(template),
+            "{}",
+            template.id()
+        );
+        let expected = match template {
+            QualityTemplate::Preview => (QualityPreset::Lightweight, 30_000, false, true, false),
+            QualityTemplate::Balanced => (QualityPreset::Lightweight, 150_000, false, true, false),
+            QualityTemplate::Preserve => (QualityPreset::Quality, 0, true, false, true),
+        };
+        assert_eq!(settings.convert.quality, expected.0);
+        assert_eq!(settings.convert.max_points, expected.1);
+        assert_eq!(settings.convert.all_points, expected.2);
+        assert_eq!(settings.convert.dither, expected.3);
+        assert_eq!(settings.convert.keep_sh, expected.4);
+        assert_eq!(settings.render.limit, 0);
+
+        assert!(!settings.auto_apply);
+        assert_eq!(settings.convert.fit_mode, FitMode::Original);
+        assert_eq!(settings.convert.fit_size, 123.5);
+        assert_eq!(settings.convert.scale, 2.5);
+        assert!(!settings.convert.center);
+        assert!(settings.convert.flip_y);
+        assert!(settings.convert.flip_z);
+        assert_eq!(settings.render.size, 1.7);
+        assert_eq!(settings.render.alpha, 0.4);
+        assert_eq!(settings.render.near, 4.5);
+        assert!(!settings.render.sort);
+        assert!(!settings.render.ellipse);
+        assert!(settings.render.panorama);
+        assert_eq!(settings.render.fov, 88.0);
+        assert_eq!(settings.render.blend, BlendMode::Additive);
+
+        let options = settings.convert.to_convert_options();
+        assert_eq!(
+            options.preserve_quality,
+            template == QualityTemplate::Preserve
+        );
+        assert_eq!(options.keep_sh, expected.4);
+    }
+}
+
+#[test]
+fn quality_template_matching_handles_manual_changes_and_persistence() {
+    let mut settings = Settings::default();
+    assert_eq!(
+        settings.matched_quality_template(),
+        Some(QualityTemplate::Preview),
+        "従来の既定値はプレビューテンプレートとして表示する"
+    );
+
+    settings.apply_quality_template(QualityTemplate::Preview);
+    assert_eq!(
+        settings.matched_quality_template(),
+        Some(QualityTemplate::Preview)
+    );
+
+    settings.convert.fit_mode = FitMode::Original;
+    settings.convert.scale = 3.0;
+    settings.convert.center = false;
+    settings.convert.flip_y = true;
+    settings.convert.flip_z = true;
+    assert_eq!(
+        settings.matched_quality_template(),
+        Some(QualityTemplate::Preview),
+        "テンプレート対象外の変更でカスタムになってはいけない"
+    );
+
+    settings.render.limit = 29_999;
+    assert_eq!(settings.matched_quality_template(), None);
+    settings.render.limit = 30_000;
+    assert_eq!(
+        settings.matched_quality_template(),
+        Some(QualityTemplate::Preview),
+        "表示上限が変換上限以上なら一致する"
+    );
+    settings.render.limit = 0;
+    settings.convert.keep_sh = true;
+    assert_eq!(
+        settings.matched_quality_template(),
+        Some(QualityTemplate::Preview),
+        "軽量テンプレートの一致判定ではSH設定を無視する"
+    );
+    settings.convert.keep_sh = false;
+    settings.convert.dither = false;
+    assert_eq!(settings.matched_quality_template(), None);
+
+    settings.apply_quality_template(QualityTemplate::Preserve);
+    let dir = temp_dir("quality_template");
+    let path = dir.join("settings.json");
+    settings.save_to(&path).unwrap();
+    let loaded = Settings::load_from(&path);
+    assert_eq!(
+        loaded.matched_quality_template(),
+        Some(QualityTemplate::Preserve)
+    );
+    assert_eq!(loaded.render.limit, 0);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn quality_template_descriptions_state_omitted_information() {
+    for template in [QualityTemplate::Preview, QualityTemplate::Balanced] {
+        let description = template.description();
+        assert!(description.contains("512色"), "{}", template.id());
+        assert!(description.contains("8段階"), "{}", template.id());
+        assert!(description.contains("SH"), "{}", template.id());
+        assert!(description.contains("省略"), "{}", template.id());
+    }
+    let preserve = QualityTemplate::Preserve.description();
+    assert!(preserve.contains("全有効点"));
+    assert!(preserve.contains("浮動小数点"));
+    assert!(preserve.contains("SH"));
+    assert!(preserve.contains("一致"));
+}
+
+#[test]
+fn quality_template_combo_applies_and_shows_custom_in_headless_render() {
+    let context = egui::Context::default();
+    let mut app = ConverterApp::headless();
+    app.settings_mut().convert.dither = false;
+    let output = render(&context, &mut app);
+    let (text, combo_pos) = rendered_text(&output, "カスタム");
+    assert!(
+        text.contains("カスタム"),
+        "不一致時のカスタム表記がありません"
+    );
+    assert!(!text.contains("軽量"));
+    assert!(!text.contains("品質優先（追加間引き・量子化なし）"));
+
+    click(
+        &context,
+        &mut app,
+        combo_pos.expect("品質テンプレートComboBoxがありません") + egui::vec2(2.0, 2.0),
+    );
+    let output = render(&context, &mut app);
+    let (text, balanced_pos) = rendered_text(&output, "バランス");
+    for label in ["プレビュー", "バランス", "品質保持"] {
+        assert!(text.contains(label), "候補 {label} がありません");
+    }
+
+    click(
+        &context,
+        &mut app,
+        balanced_pos.expect("バランス候補がありません") + egui::vec2(2.0, 2.0),
+    );
+    let output = render(&context, &mut app);
+    let (text, _) = rendered_text(&output, "バランス");
+    assert_eq!(
+        app.settings().matched_quality_template(),
+        Some(QualityTemplate::Balanced)
+    );
+    assert_eq!(app.settings().render.limit, 0);
+    assert!(!app.settings().convert.keep_sh);
+    assert!(text.contains("150,000点"));
+    assert!(text.contains("512色"));
+    assert!(text.contains("8段階"));
+    assert!(text.contains("SH"));
+
+    app.settings_mut().convert.dither = false;
+    let output = render(&context, &mut app);
+    let (text, _) = rendered_text(&output, "カスタム");
+    assert!(
+        text.contains("カスタム"),
+        "手動変更後にカスタム表記へ戻りません"
+    );
+}
+
+#[test]
+fn reselecting_current_quality_template_applies_canonical_settings() {
+    for template in QualityTemplate::ALL {
+        let context = egui::Context::default();
+        let mut app = ConverterApp::headless();
+        app.settings_mut().apply_quality_template(template);
+        if template == QualityTemplate::Preserve {
+            app.settings_mut().convert.dither = true;
+            app.settings_mut().convert.all_points = false;
+            app.settings_mut().convert.max_points = 17;
+        } else {
+            app.settings_mut().render.limit = app.settings().convert.max_points;
+        }
+        assert_eq!(app.settings().matched_quality_template(), Some(template));
+        let mut expected = app.settings().clone();
+        expected.apply_quality_template(template);
+        let output = render(&context, &mut app);
+        let (_, combo_pos) = rendered_text(&output, template.label());
+        click(
+            &context,
+            &mut app,
+            combo_pos.unwrap() + egui::vec2(2.0, 2.0),
+        );
+        let output = render(&context, &mut app);
+        let (_, option_pos) = rendered_text(&output, template.label());
+        click(
+            &context,
+            &mut app,
+            option_pos.unwrap() + egui::vec2(2.0, 2.0),
+        );
+        assert_eq!(app.settings().render.limit, 0, "{}", template.id());
+        assert_eq!(
+            serde_json::to_value(&app.settings().convert).unwrap(),
+            serde_json::to_value(&expected.convert).unwrap(),
+            "{}",
+            template.id()
+        );
+    }
+}
+
+#[test]
+fn cli_lists_quality_templates_as_json() {
+    let output = Command::new(env!("CARGO_BIN_EXE_su3ds"))
+        .arg("--list-quality-templates")
+        .output()
+        .expect("su3ds を起動できません");
+    assert!(
+        output.status.success(),
+        "exit={:?} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(entries.len(), QualityTemplate::ALL.len());
+
+    for (entry, template) in entries.iter().zip(QualityTemplate::ALL) {
+        assert_eq!(entry["id"].as_str(), Some(template.id()));
+        assert_eq!(entry["label"].as_str(), Some(template.label()));
+        assert_eq!(entry["description"].as_str(), Some(template.description()));
+        assert_eq!(entry["render_limit"].as_u64(), Some(0));
+        let convert = &entry["convert"];
+        let expected = match template {
+            QualityTemplate::Preview => ("lightweight", 30_000, false, true, false),
+            QualityTemplate::Balanced => ("lightweight", 150_000, false, true, false),
+            QualityTemplate::Preserve => ("quality", 0, true, false, true),
+        };
+        assert_eq!(convert["quality"].as_str(), Some(expected.0));
+        assert_eq!(convert["max_points"].as_u64(), Some(expected.1));
+        assert_eq!(convert["all_points"].as_bool(), Some(expected.2));
+        assert_eq!(convert["dither"].as_bool(), Some(expected.3));
+        assert_eq!(convert["keep_sh"].as_bool(), Some(expected.4));
+    }
+}
+
+#[test]
+fn old_settings_json_still_loads_with_defaults() {
+    let old = r#"{
+        "schema_version": 1,
+        "auto_apply": false,
+        "convert": {"quality": "lightweight", "max_points": 12345},
+        "render": {"limit": 0}
+    }"#;
+    let settings: Settings = serde_json::from_str(old).unwrap();
+    assert!(!settings.auto_apply);
+    assert_eq!(settings.convert.max_points, 12_345);
+    assert_eq!(settings.convert.keep_sh, ConvertSettings::default().keep_sh);
+    assert_eq!(settings.render.size, RenderSettings::default().size);
 }
