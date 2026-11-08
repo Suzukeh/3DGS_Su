@@ -22,13 +22,31 @@
 
 すべて **3DGS_Suで実際に描画した作例** です。同じVanadiniteを各テンプレートで変換し、カメラ、向き、大きさ、表示設定を揃えています。
 
+### 1周するMP4（品質比較用）
+
+各設定で360度を1周する、**1280×720・30fps・6秒（180フレーム）** の動画です。フレームの複製や補間でfpsを増やさず、すべての視点を実際に描画しています。縮小画像を拡大した動画ではありません。
+
+| テンプレート | 色の比較用：RGBロスレス | 再生互換性を優先：通常MP4 |
+|---|---|---|
+| プレビュー | [RGB MP4](https://github.com/Suzukeh/3DGS_Su/releases/download/v0.5.1/3DGS_Su-quality-preview-rgb.mp4) | [通常MP4](https://github.com/Suzukeh/3DGS_Su/releases/download/v0.5.1/3DGS_Su-quality-preview-web.mp4) |
+| バランス | [RGB MP4](https://github.com/Suzukeh/3DGS_Su/releases/download/v0.5.1/3DGS_Su-quality-balanced-rgb.mp4) | [通常MP4](https://github.com/Suzukeh/3DGS_Su/releases/download/v0.5.1/3DGS_Su-quality-balanced-web.mp4) |
+| 品質保持 | [RGB MP4](https://github.com/Suzukeh/3DGS_Su/releases/download/v0.5.1/3DGS_Su-quality-preserve-rgb.mp4) | [通常MP4](https://github.com/Suzukeh/3DGS_Su/releases/download/v0.5.1/3DGS_Su-quality-preserve-web.mp4) |
+
+**品質を判定する場合はRGBロスレス版をダウンロードしてください。** 描画した8bit RGBの値を、RGB→YUV変換や色差の間引きなしで保存しています。復号した全フレームの画素が元の連番と一致することを確認しています。入力の浮動小数点やHDR値を、そのまま動画に保存するという意味ではありません。
+
+RGB版はH.264のHigh 4:4:4 Predictive形式です。ブラウザや一部プレーヤーでは再生できない場合があります。通常版はH.264・色差4:2:0で再生互換性を優先していますが、色の厳密な比較には使わないでください。
+
+GIFは色数とfpsを抑えた手軽な作例として、[動き・パノラマの作例](samples.md)に残しています。品質比較にはGIFを使っていません。
+
+### 同じ視点の静止画
+
 <img src="quality-presets/overview.png" width="960" alt="同一素材・同一カメラのプレビュー、バランス、品質保持の比較。青枠は細部比較の範囲">
 
 ### 同じ範囲の細部
 
-全体図の青枠内、160×120ピクセルを各640×480ピクセルへ拡大しています。画像原寸で4倍、補間なしです。
+全体図の青枠内、320×180ピクセルを各640×360ピクセルへ拡大しています。2倍、補間なしです。
 
-<img src="quality-presets/detail.png" width="960" alt="同じ範囲を4倍拡大した比較。点密度、欠け、色と不透明度の段階の違い">
+<img src="quality-presets/detail.png" width="960" alt="同じ範囲を2倍拡大した比較。点密度、欠け、色と不透明度の段階の違い">
 
 この素材では、プレビューは点が疎で、結晶の細部や台座が欠けています。バランスは密度が増しますが、色・不透明度の段階はプレビューと同じです。品質保持では結晶の面や濃淡が残る一方、入力由来のノイズまでなくなるわけではありません。
 
@@ -42,14 +60,15 @@
 
 容量はこの素材のファイルサイズで、描画時のメモリ使用量ではありません。品質保持は1点あたりに保存する情報も多いため、点数の比率以上に容量が増えます。
 
-プレビュー原寸PNG（800×450）：[プレビュー](quality-presets/preview.png) / [バランス](quality-presets/balanced.png) / [品質保持](quality-presets/preserve.png)
+原寸PNG（1280×720、動画の先頭フレームと同じ画素）：[プレビュー](quality-presets/preview.png) / [バランス](quality-presets/balanced.png) / [品質保持](quality-presets/preserve.png)
 
 <details>
 <summary>比較条件</summary>
 
 - 入力：Vanadinite、936,246点、SHあり
 - 3種類とも最大辺400へ正規化、倍率1、中心合わせあり、Y/Z反転なし
-- シーン：1280×720、プレビュー画像：800×450
+- シーン：1280×720。静止画も同じ1280×720で、拡大縮小していない
+- 動画：ネイティブ1280×720のRGB、30fps、180フレームで360度。3種類とも同じ角度・速度・開始位置
 - 同じカメラ制御と黒背景。通常合成、楕円表示、奥から描画
 - サイズ1、不透明度1、手前クリップ10、表示上限0、パノラマなし
 - 全体図は各PNGを同じ倍率で縮小。細部は3枚の同じ座標を切り出し

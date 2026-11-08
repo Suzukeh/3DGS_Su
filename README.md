@@ -56,7 +56,11 @@ UIの詳しい操作、パラメータ、対応形式は
 
 ## 作例
 
-### 品質テンプレートの比較
+Vanadinite のターンテーブルと、360度スキャンの Infinity Octo Art MK のパノラマ表示を掲載しています。GIFは手軽に動きを見るための作例です。
+
+[動き・パノラマの作例を見る](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/samples.md)
+
+## 品質テンプレートの比較
 
 同じVanadiniteを、同じカメラ・表示設定で3DGS_Suから描画しています。
 
@@ -64,22 +68,19 @@ UIの詳しい操作、パラメータ、対応形式は
 
 > “Vanadinite” by Yann de Couëssin / Source: [scene/663d6a97](https://superspl.at/scene/663d6a97) / CC BY 4.0
 
-[細部の拡大・設定と容量の比較](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/quality-presets.md)
+品質を見るために、各テンプレートで1周する **1280×720・30fpsのMP4** を用意しています。GIFではなく、RGBロスレス版で色と動きを比較できます。
 
-### 動き・パノラマ
-
-Vanadinite と、360度スキャンの Infinity Octo Art MK を掲載しています。
-
-[作例を見る](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/samples.md)
+[1周する比較MP4・細部の拡大・設定と容量の比較](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/quality-presets.md)
 
 ## ドキュメント
 
 - [インストール](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/install.md)
 - [使い方・パラメータ・対応形式](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/usage.md)
+- [動き・パノラマの作例](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/samples.md)
 - [品質テンプレート・比較作例](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/quality-presets.md)
 - [.su3ds とは](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/su3ds.md)
 - [注意・制限](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/notes.md)
-- [作例](https://github.com/Suzukeh/3DGS_Su/blob/main/docs/samples.md)
+
 
 ## ライセンス
 
