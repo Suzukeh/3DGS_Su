@@ -4,6 +4,17 @@
 [AviUtl2 カタログ用データベース](https://github.com/Neosku/aviutl2-catalog-data)
 へ登録するときのエントリです。
 
+## ファイルの使い分け（形式に注意）
+
+| ファイル | 形 | 用途 |
+|---|---|---|
+| `Suzuke.3DGS_Su.json` | **単一オブジェクト** `{ ... }` | 内容の確認用。登録画面の各入力欄へ転記する |
+| `Suzuke.3DGS_Su.index.json` | **配列** `[ { ... } ]` | `index.json` へ追記する用 |
+
+`index.json` は**配列**です。単一オブジェクトをそのまま貼ると
+`Invalid input: expected array, received object`（形式が不正）で弾かれます。
+既存の `index.json` の末尾へ、配列の中身（`[` と `]` の内側）を追記してください。
+
 ## 登録前に必要なもの
 
 1. GitHub リポジトリ `Suzukeh/3DGS_Su` を公開する
@@ -20,7 +31,7 @@
 1. `aviutl2-catalog-data` を fork する
 2. `image/Suzuke.3DGS_Su_thumbnail.png` にサムネイル、
    `image/Suzuke.3DGS_Su_preview.png` に説明画像を置く
-3. `index.json` に `Suzuke.3DGS_Su.json` の内容を追加する
+3. `index.json`（配列）へ `Suzuke.3DGS_Su.index.json` の中身を追加する
 4. Pull Request を出す
 
 カタログ本体の「パッケージ登録」画面から入力する場合は、
