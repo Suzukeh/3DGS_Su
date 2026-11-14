@@ -136,3 +136,178 @@ fn overwrite_dialog_prevents_writing_until_confirmed() {
     assert_ne!(fs::read(&output).unwrap(), b"do not overwrite yet");
     fs::remove_dir_all(source.parent().unwrap()).unwrap();
 }
+
+/// 進捗スロットへ任意の値を入れ、その状態の描画テキストを取り出す。
+fn draw_with_progress(app: &mut ConverterApp, progress: Option<ConvertProgress>) -> String {
+    let context = egui::Context::default();
+    let mut output = None;
+    for _ in 0..2 {
+        output = Some(context.run_ui(egui::RawInput::default(), |ui| {
+            if let Some(job) = &app.job
+                && let Ok(mut slot) = job.progress.lock()
+            {
+                *slot = progress;
+            }
+            app.draw(ui);
+        }));
+    }
+    let output = output.unwrap();
+    let mut text = String::new();
+    collect_text(&output.shapes, &mut text);
+    text
+}
+
+fn collect_text(shapes: &[egui::epaint::ClippedShape], text: &mut String) {
+    fn walk(shape: &egui::Shape, text: &mut String) {
+        match shape {
+            egui::Shape::Text(value) => {
+                text.push_str(&value.galley.job.text);
+                text.push('\n');
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, text);
+                }
+            }
+            _ => {}
+        }
+    }
+    for clipped in shapes {
+        walk(&clipped.shape, text);
+    }
+}
+
+/// 変換中ジョブを持たせ、進捗表示と中止ボタンが描画されることを確かめる。
+fn busy_app() -> ConverterApp {
+    let (source, output) = input("progress");
+    let mut app = ConverterApp::headless();
+    app.settings.convert.quality = QualityPreset::Quality;
+    app.settings.convert.all_points = true;
+    let _ = (source, output);
+    // 変換は数ミリ秒で終わるため、実ジョブでは描画前に完了してしまう。
+    // 進捗表示の検証には、結果を返さない停止ジョブを使う。
+    let (sender, receiver) = mpsc::channel();
+    std::mem::forget(sender); // 送信されないまま接続を保つ
+    app.job = Some(ConversionJob {
+        receiver,
+        progress: Arc::new(Mutex::new(None)),
+        cancel: CancelFlag::new(),
+        handle: None,
+        targets: Vec::new(),
+        epoch: 0,
+        output: PathBuf::from("result.su3ds"),
+        quality: true,
+        auto_apply: false,
+        apply_limit: None,
+    });
+    app
+}
+
+#[test]
+fn processing_progress_shows_percentage_and_points() {
+    let mut app = busy_app();
+    let text = draw_with_progress(
+        &mut app,
+        Some(ConvertProgress {
+            stage: ConvertStage::Processing,
+            fraction: Some(0.42),
+            points_done: 4200,
+            points_total: 10000,
+        }),
+    );
+    assert!(text.contains("変換 42%"), "{text}");
+    assert!(text.contains("4,200 / 10,000 点"), "{text}");
+    assert!(
+        text.contains("中止"),
+        "中止ボタンが描画されていません: {text}"
+    );
+}
+
+#[test]
+fn loading_progress_shows_indeterminate_stage() {
+    let mut app = busy_app();
+    let text = draw_with_progress(
+        &mut app,
+        Some(ConvertProgress {
+            stage: ConvertStage::Loading,
+            fraction: None,
+            points_done: 0,
+            points_total: 0,
+        }),
+    );
+    assert!(text.contains("読み込み"), "{text}");
+    assert!(text.contains("中止"), "{text}");
+}
+
+#[test]
+fn missing_progress_shows_preparing_message() {
+    let mut app = busy_app();
+    let text = draw_with_progress(&mut app, None);
+    assert!(text.contains("準備しています"), "{text}");
+}
+
+#[test]
+fn narrow_panel_keeps_progress_and_abort_visible() {
+    let mut app = busy_app();
+    let context = egui::Context::default();
+    let mut output = None;
+    for _ in 0..2 {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(300.0, 480.0),
+            )),
+            ..Default::default()
+        };
+        output = Some(context.run_ui(input, |ui| {
+            if let Some(job) = &app.job
+                && let Ok(mut slot) = job.progress.lock()
+            {
+                *slot = Some(ConvertProgress {
+                    stage: ConvertStage::Processing,
+                    fraction: Some(0.5),
+                    points_done: 50,
+                    points_total: 100,
+                });
+            }
+            app.draw(ui);
+        }));
+    }
+    let output = output.unwrap();
+    let mut text = String::new();
+    collect_text(&output.shapes, &mut text);
+    assert!(text.contains("変換 50%"), "{text}");
+    assert!(text.contains("中止"), "{text}");
+    // 画面外へはみ出す描画がないこと。
+    let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 480.0));
+    let mut outside = Vec::new();
+    collect_outside(&output.shapes, bounds, &mut outside);
+    assert!(outside.is_empty(), "画面外の描画: {outside:?}");
+}
+
+fn collect_outside(
+    shapes: &[egui::epaint::ClippedShape],
+    bounds: egui::Rect,
+    found: &mut Vec<String>,
+) {
+    fn walk(shape: &egui::Shape, bounds: egui::Rect, found: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(text) => {
+                if !text.galley.job.text.is_empty()
+                    && !bounds.contains_rect(text.visual_bounding_rect())
+                {
+                    found.push(text.galley.job.text.clone());
+                }
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, bounds, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    for clipped in shapes {
+        walk(&clipped.shape, bounds, found);
+    }
+}

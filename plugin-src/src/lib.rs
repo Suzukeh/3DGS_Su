@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 use aviutl2::generic::GlobalEditHandle;
 use aviutl2::{AnyResult, generic::GenericPlugin};
 use aviutl2_eframe::EframeWindow;
-pub use convert::{ConvertInfo, ConvertOptions, convert_file};
+pub use convert::{
+    CancelFlag, Cancelled, ConvertInfo, ConvertOptions, ConvertProgress, ConvertStage,
+    convert_file, convert_file_with,
+};
 
 const EFFECT: &str = "3DGS_Su";
 const ITEM: &str = "3DGSファイル(.su3ds)";

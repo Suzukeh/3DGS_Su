@@ -7,7 +7,10 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, TryRecvError},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, TryRecvError},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -19,12 +22,27 @@ use native_dialog::FileDialogBuilder;
 use crate::settings::{
     BlendMode, FILE_ITEM, FitMode, QualityPreset, QualityTemplate, RENDER_LIMIT, Settings,
 };
+
 use crate::{
-    ConvertInfo, ConvertOptions, apply_properties, capture_targets, convert_file, current_epoch,
-    last_file_path, pick_file, read_properties, selected_count, write_last_file,
+    CancelFlag, ConvertInfo, ConvertOptions, ConvertProgress, ConvertStage, apply_properties,
+    capture_targets, convert_file_with, current_epoch, last_file_path, pick_file, read_properties,
+    selected_count, write_last_file,
 };
 
 const SETTINGS_HINT: &str = "設定は自動保存されます。";
+
+/// 点数を3桁区切りで表示する。`format_number` は小数向けで桁区切りを持たない。
+fn format_count(value: usize) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
 
 #[cfg(test)]
 #[path = "gui_tests.rs"]
@@ -64,6 +82,8 @@ struct PendingConversion {
 
 struct ConversionJob {
     receiver: Receiver<Result<ConvertInfo, String>>,
+    progress: Arc<Mutex<Option<ConvertProgress>>>,
+    cancel: CancelFlag,
     handle: Option<JoinHandle<()>>,
     targets: Vec<ObjectHandle>,
     epoch: u64,
@@ -87,18 +107,35 @@ impl ConversionJob {
             ..
         } = pending;
         let (sender, receiver) = mpsc::channel();
+        let progress = Arc::new(Mutex::new(None));
+        let cancel = CancelFlag::new();
+        let worker_progress = Arc::clone(&progress);
+        let worker_cancel = cancel.clone();
         let worker_output = output.clone();
         let handle = thread::Builder::new()
             .name("3dgs-convert".into())
             .spawn(move || {
                 // ワーカー内ではAviUtl2のホストAPIを一切呼ばない。
-                let result = convert_file(&input, &worker_output, &options)
-                    .map_err(|error| error.to_string());
+                let mut report = |update: ConvertProgress| {
+                    if let Ok(mut slot) = worker_progress.lock() {
+                        *slot = Some(update);
+                    }
+                };
+                let result = convert_file_with(
+                    &input,
+                    &worker_output,
+                    &options,
+                    &worker_cancel,
+                    &mut report,
+                )
+                .map_err(|error| error.to_string());
                 let _ = sender.send(result);
             })
             .map_err(|error| format!("変換スレッドを開始できません: {error}"))?;
         Ok(Self {
             receiver,
+            progress,
+            cancel,
             handle: Some(handle),
             targets,
             epoch,
@@ -107,6 +144,14 @@ impl ConversionJob {
             auto_apply,
             apply_limit,
         })
+    }
+
+    fn progress(&self) -> Option<ConvertProgress> {
+        self.progress.lock().ok().and_then(|slot| *slot)
+    }
+
+    fn cancel(&self) {
+        self.cancel.cancel();
     }
 
     fn poll(&self) -> Option<Result<ConvertInfo, String>> {
@@ -477,7 +522,11 @@ impl ConverterApp {
         let info = match result {
             Ok(info) => info,
             Err(error) => {
-                self.set_status(StatusKind::Error, format!("変換に失敗しました: {error}"));
+                if error.contains("中止") {
+                    self.set_status(StatusKind::Idle, error);
+                } else {
+                    self.set_status(StatusKind::Error, format!("変換に失敗しました: {error}"));
+                }
                 return;
             }
         };
@@ -738,6 +787,22 @@ impl ConverterApp {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
 
+        // 進捗・中止と実行ボタンはパネル下端に固定する。狭い画面では
+        // スクロールしないと押せない、という状態を避けるため。
+        egui::Panel::bottom("3dgs_actions")
+            .resizable(false)
+            .show(ui, |ui| {
+                self.draw_actions(ui, busy);
+                if !busy {
+                    self.draw_status(ui);
+                }
+            });
+        if busy {
+            egui::Panel::top("3dgs_busy")
+                .resizable(false)
+                .show(ui, |ui| self.draw_busy(ui));
+        }
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -752,7 +817,7 @@ impl ConverterApp {
                         ui.small("3. 「変換して適用」を押します。");
                         ui.small("4. 表示設定は「選択中へ適用」を押したときだけ反映されます。");
                         ui.small("既存の .su3ds / .json がある場合は上書き確認が出ます。");
-                        ui.small("変換中は画面を閉じるまで完了を待ってください（中止機能はありません）。");
+                        ui.small("変換中は進捗が出ます。「中止」でいつでも中断できます。");
                     });
 
                 ui.add_space(4.0);
@@ -782,43 +847,6 @@ impl ConverterApp {
                         ui.small("高品質の自動適用時は表示上限=0になります。");
                     }
                 });
-
-                ui.horizontal_wrapped(|ui| {
-                    let primary = if self.settings.auto_apply {
-                        "変換して適用"
-                    } else {
-                        "変換"
-                    };
-                    if ui
-                        .add_enabled(
-                            !busy && self.pending_overwrite.is_none(),
-                            egui::Button::new(primary)
-                                .min_size(egui::vec2(130.0, 30.0))
-                                .wrap(),
-                        )
-                        .clicked()
-                    {
-                        self.request_conversion();
-                    }
-                    if ui
-                        .add_enabled(
-                            !busy,
-                            egui::Button::new("既存の .su3ds を適用...").wrap(),
-                        )
-                        .clicked()
-                    {
-                        self.apply_existing();
-                    }
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("直前の結果を適用").wrap())
-                        .clicked()
-                    {
-                        self.apply_last();
-                    }
-                });
-
-                ui.add_space(6.0);
-                self.draw_status(ui);
                 ui.separator();
                 self.draw_render_settings(ui);
                 ui.add_space(8.0);
@@ -829,38 +857,90 @@ impl ConverterApp {
         self.persist_if_changed();
     }
 
+    /// 実行ボタン。スクロール領域の外に置き、常に押せるようにする。
+    fn draw_actions(&mut self, ui: &mut egui::Ui, busy: bool) {
+        let primary = if self.settings.auto_apply {
+            "変換して適用"
+        } else {
+            "変換"
+        };
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    !busy && self.pending_overwrite.is_none(),
+                    egui::Button::new(primary)
+                        .min_size(egui::vec2(130.0, 28.0))
+                        .wrap(),
+                )
+                .clicked()
+            {
+                self.request_conversion();
+            }
+            if ui
+                .add_enabled(!busy, egui::Button::new("既存の .su3ds を適用...").wrap())
+                .clicked()
+            {
+                self.apply_existing();
+            }
+            if ui
+                .add_enabled(!busy, egui::Button::new("直前の結果を適用").wrap())
+                .clicked()
+            {
+                self.apply_last();
+            }
+        });
+    }
+
     fn draw_paths(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            ui.label("入力");
-            let width = (ui.available_width() - 190.0).max(140.0);
-            let response = ui.add_sized(
-                [width, 22.0],
-                egui::TextEdit::singleline(&mut self.input).hint_text(".ply / .sog / SOGフォルダ"),
-            );
-            if response.changed() && (self.output_auto || self.output.trim().is_empty()) {
-                self.sync_output();
+        // 狭い環境では入力欄を全幅にして、ボタンを次の行へ送る。
+        let narrow = ui.available_width() < 460.0;
+        for (label, hint, is_input) in [
+            ("入力", ".ply / .sog / SOGフォルダ", true),
+            ("出力", "出力 .su3ds", false),
+        ] {
+            if narrow {
+                ui.label(label);
             }
-            if ui.button("ファイル参照...").clicked() {
-                self.choose_input_file();
-            }
-            if ui.button("SOGフォルダ...").clicked() {
-                self.choose_input_folder();
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.label("出力");
-            let width = (ui.available_width() - 110.0).max(140.0);
-            let response = ui.add_sized(
-                [width, 22.0],
-                egui::TextEdit::singleline(&mut self.output).hint_text("出力 .su3ds"),
-            );
-            if response.changed() {
-                self.output_auto = false;
-            }
-            if ui.button("保存先...").clicked() {
-                self.choose_output();
-            }
-        });
+            ui.horizontal_wrapped(|ui| {
+                if !narrow {
+                    ui.label(label);
+                }
+                let buttons = if is_input { 210.0 } else { 90.0 };
+                let width = if narrow {
+                    ui.available_width()
+                } else {
+                    (ui.available_width() - buttons).max(140.0)
+                };
+                let text = if is_input {
+                    &mut self.input
+                } else {
+                    &mut self.output
+                };
+                let response = ui.add_sized(
+                    [width, 22.0],
+                    egui::TextEdit::singleline(text).hint_text(hint),
+                );
+                if response.changed() {
+                    if is_input {
+                        if self.output_auto || self.output.trim().is_empty() {
+                            self.sync_output();
+                        }
+                    } else {
+                        self.output_auto = false;
+                    }
+                }
+                if is_input {
+                    if ui.button("ファイル参照...").clicked() {
+                        self.choose_input_file();
+                    }
+                    if ui.button("SOGフォルダ...").clicked() {
+                        self.choose_input_folder();
+                    }
+                } else if ui.button("保存先...").clicked() {
+                    self.choose_output();
+                }
+            });
+        }
         ui.small("同名の .json も出力されます。保存先は出力欄で直接編集できます。");
     }
 
@@ -1006,18 +1086,26 @@ impl ConverterApp {
         });
     }
 
-    fn draw_status(&self, ui: &mut egui::Ui) {
-        if self.job.is_some() {
-            let elapsed = self
-                .started_at
-                .map(|started| started.elapsed().as_secs_f32())
-                .unwrap_or_default();
-            ui.horizontal(|ui| {
-                ui.add(egui::Spinner::new().size(16.0));
-                ui.label(format!("変換中… {elapsed:.1} 秒"));
-            });
-            ui.small("進捗率は取得できません。完了まで待ってください。");
-        }
+    /// 変換中の進捗・経過時間・中止ボタン。パネル最上部に置く。
+    fn draw_busy(&mut self, ui: &mut egui::Ui) {
+        let elapsed = self
+            .started_at
+            .map(|started| started.elapsed().as_secs_f32())
+            .unwrap_or_default();
+        // 狭いパネルでも「中止」が隠れないよう、折り返しを許可する。
+        ui.horizontal_wrapped(|ui| {
+            ui.add(egui::Spinner::new().size(16.0));
+            ui.label(format!("変換中… {elapsed:.1} 秒"));
+            if ui.button("中止").clicked()
+                && let Some(job) = &self.job
+            {
+                job.cancel();
+            }
+        });
+        self.draw_progress(ui);
+    }
+
+    fn draw_status(&mut self, ui: &mut egui::Ui) {
         let color = match self.status_kind {
             StatusKind::Error => Some(egui::Color32::LIGHT_RED),
             StatusKind::Complete => Some(egui::Color32::from_rgb(120, 200, 140)),
@@ -1030,6 +1118,40 @@ impl ConverterApp {
             text
         };
         ui.label(text);
+    }
+
+    fn draw_progress(&self, ui: &mut egui::Ui) {
+        let progress = self.job.as_ref().and_then(ConversionJob::progress);
+        let Some(progress) = progress else {
+            ui.small("準備しています…");
+            return;
+        };
+        let stage = progress.stage.label();
+        match progress.stage {
+            ConvertStage::Processing | ConvertStage::Writing => {
+                let fraction = progress.fraction.unwrap_or(0.0);
+                let text = format!(
+                    "{stage} {:.0}% ({} / {} 点)",
+                    fraction * 100.0,
+                    format_count(progress.points_done),
+                    format_count(progress.points_total)
+                );
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .desired_width(ui.available_width().min(360.0))
+                        .text(text),
+                );
+            }
+            ConvertStage::Loading => {
+                ui.add(
+                    egui::ProgressBar::new(0.0)
+                        .desired_width(ui.available_width().min(360.0))
+                        .animate(true)
+                        .text(format!("{stage}…")),
+                );
+            }
+        }
+        ui.small("中止すると出力ファイルは作成されません。");
     }
 
     fn draw_render_settings(&mut self, ui: &mut egui::Ui) {
@@ -1148,6 +1270,9 @@ impl eframe::App for ConverterApp {
 impl Drop for ConverterApp {
     fn drop(&mut self) {
         if let Some(mut job) = self.job.take() {
+            // 終了時に大規模変換の完了を待つと、AviUtl2が長時間閉じなくなる。
+            // 中止を要求してからスレッドを回収する。
+            job.cancel();
             job.join();
         }
     }

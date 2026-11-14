@@ -6,6 +6,10 @@
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::Path;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use image::ImageFormat;
 use serde_json::Value;
@@ -54,6 +58,165 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 
 fn error(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
     io::Error::other(message.into()).into()
+}
+
+/// 変換の段階。進捗表示と中止の単位。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConvertStage {
+    /// 入力の読み込み（PLY解析・SOG復号）。所要時間が読みにくい。
+    Loading,
+    /// 点ごとの変換。点数に対する割合が分かる。
+    Processing,
+    /// ファイル書き出し。
+    Writing,
+}
+
+impl ConvertStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Loading => "読み込み",
+            Self::Processing => "変換",
+            Self::Writing => "書き出し",
+        }
+    }
+}
+
+/// 変換の進行状況。UIはこれを読んで表示するだけ。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConvertProgress {
+    pub stage: ConvertStage,
+    /// 段階内の割合(0.0〜1.0)。読み込み・書き出しでは `None`。
+    pub fraction: Option<f32>,
+    pub points_done: usize,
+    pub points_total: usize,
+}
+
+impl ConvertProgress {
+    /// 段階をまたいだ全体のおおよその割合。読み込みは全体の1/4、
+    /// 変換を1/2、書き出しを1/4として重み付けする。
+    pub fn overall(&self) -> Option<f32> {
+        let fraction = self.fraction?;
+        let base = match self.stage {
+            ConvertStage::Loading => return None,
+            ConvertStage::Processing => 0.25,
+            ConvertStage::Writing => 0.75,
+        };
+        let span = if self.stage == ConvertStage::Processing {
+            0.5
+        } else {
+            0.25
+        };
+        Some((base + span * fraction).clamp(0.0, 1.0))
+    }
+}
+
+/// 中止要求。ワーカースレッドとUIスレッドで共有する。
+#[derive(Clone, Default)]
+pub struct CancelFlag(Arc<AtomicBool>);
+
+impl CancelFlag {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// 中止によって変換を終了したことを表すエラー。
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("変換を中止しました")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+/// 進捗の通知と中止の確認をまとめた内部ヘルパー。
+struct Reporter<'a> {
+    progress: &'a mut dyn FnMut(ConvertProgress),
+    cancel: &'a CancelFlag,
+    stage: ConvertStage,
+    total: usize,
+    /// 段階内でこの通知範囲が占める割合。1段階を複数のループで
+    /// 分担するときに、割合が逆行しないよう区間を指定する。
+    span: (f32, f32),
+    last_permille: Option<u32>,
+}
+
+impl<'a> Reporter<'a> {
+    fn new(progress: &'a mut dyn FnMut(ConvertProgress), cancel: &'a CancelFlag) -> Self {
+        Self {
+            progress,
+            cancel,
+            stage: ConvertStage::Loading,
+            total: 0,
+            span: (0.0, 1.0),
+            last_permille: None,
+        }
+    }
+
+    fn stage(&mut self, stage: ConvertStage, total: usize) {
+        self.stage_range(stage, total, 0.0, 1.0);
+    }
+
+    fn stage_range(&mut self, stage: ConvertStage, total: usize, start: f32, end: f32) {
+        self.stage = stage;
+        self.total = total;
+        self.span = (start, end);
+        self.last_permille = None;
+        self.emit(0);
+    }
+
+    fn emit(&mut self, done: usize) {
+        let fraction = if self.total == 0 {
+            None
+        } else {
+            let within = (done as f32 / self.total as f32).clamp(0.0, 1.0);
+            let (start, end) = self.span;
+            Some((start + (end - start) * within).clamp(0.0, 1.0))
+        };
+        (self.progress)(ConvertProgress {
+            stage: self.stage,
+            fraction,
+            points_done: done,
+            points_total: self.total,
+        });
+    }
+
+    /// 点ごとのループから呼ぶ。中止要求があれば `Cancelled` を返す。
+    /// 通知は0.1%刻みに間引く（最大1000回）。
+    fn tick(&mut self, done: usize) -> Result<()> {
+        if self.cancel.is_cancelled() {
+            return Err(Box::new(Cancelled));
+        }
+        let permille = if self.total == 0 {
+            0
+        } else {
+            ((done as u64 * 1000) / self.total as u64) as u32
+        };
+        if self.last_permille != Some(permille) {
+            self.last_permille = Some(permille);
+            self.emit(done);
+        }
+        Ok(())
+    }
+
+    /// ループの外で中止だけを確認する。
+    fn check(&self) -> Result<()> {
+        if self.cancel.is_cancelled() {
+            return Err(Box::new(Cancelled));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -130,7 +293,20 @@ impl RawCloud {
 
 /// 入力ファイルを読み、出力 `.su3ds` と同名の JSON を書く。
 pub fn convert_file(input: &Path, output: &Path, options: &ConvertOptions) -> Result<ConvertInfo> {
+    convert_file_with(input, output, options, &CancelFlag::new(), &mut |_| {})
+}
+
+/// 進捗通知と中止に対応した変換。`progress` は変換スレッドから呼ばれる。
+pub fn convert_file_with(
+    input: &Path,
+    output: &Path,
+    options: &ConvertOptions,
+    cancel: &CancelFlag,
+    progress: &mut dyn FnMut(ConvertProgress),
+) -> Result<ConvertInfo> {
     let started = std::time::Instant::now();
+    let mut reporter = Reporter::new(progress, cancel);
+    reporter.stage(ConvertStage::Loading, 0);
     let raw = if is_sog(input)? {
         load_sog(
             input,
@@ -140,6 +316,7 @@ pub fn convert_file(input: &Path, output: &Path, options: &ConvertOptions) -> Re
     } else {
         load_ply(input)?
     };
+    reporter.check()?;
     let load_ms = started.elapsed().as_millis();
     let process_started = std::time::Instant::now();
 
@@ -148,9 +325,13 @@ pub fn convert_file(input: &Path, output: &Path, options: &ConvertOptions) -> Re
         return Err(error("有効な点がありません"));
     }
 
+    // 変換段階は「共分散の計算」と「有効点の選別」の2ループに分かれる。
+    // 割合が後退しないよう、それぞれ前半・後半へ割り当てる。
+    reporter.stage_range(ConvertStage::Processing, count, 0.0, 0.5);
     let mut pos = raw.pos;
     let mut cov = Vec::with_capacity(count);
     for i in 0..count {
+        reporter.tick(i)?;
         cov.push(covariance(raw.quat[i], raw.log_scale[i]));
     }
 
@@ -199,8 +380,10 @@ pub fn convert_file(input: &Path, output: &Path, options: &ConvertOptions) -> Re
         }
     }
 
+    reporter.stage_range(ConvertStage::Processing, count, 0.5, 1.0);
     let mut order: Vec<usize> = Vec::with_capacity(count);
     for i in 0..count {
+        reporter.tick(i)?;
         if !pos[i].iter().all(|v| v.is_finite())
             || !cov[i].iter().all(|v| v.is_finite())
             || !raw.alpha[i].is_finite()
@@ -306,8 +489,10 @@ pub fn convert_file(input: &Path, output: &Path, options: &ConvertOptions) -> Re
     } else {
         RECORD_SIZE
     };
+    reporter.stage(ConvertStage::Writing, written);
     let mut body = Vec::with_capacity(written * record_size);
-    for &i in &order {
+    for (done, &i) in order.iter().enumerate() {
+        reporter.tick(done)?;
         if options.preserve_quality {
             for value in pos[i] {
                 body.extend_from_slice(&(value as f32).to_le_bytes());
@@ -398,6 +583,7 @@ pub fn convert_file(input: &Path, output: &Path, options: &ConvertOptions) -> Re
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
     }
+    reporter.check()?;
     let mut data = header;
     data.extend_from_slice(&body);
     fs::write(output, data)?;
@@ -1234,6 +1420,139 @@ mod tests {
         let result = run(&input, &output);
         let _ = fs::remove_dir_all(root);
         result
+    }
+
+    #[test]
+    fn progress_reports_processing_fraction_and_reaches_completion() {
+        // 軽量変換は不透明度 0.004 以下を捨てるため、既定の -8 ではなく -2 を使う。
+        let fixture = String::from_utf8(ascii_ply(40))
+            .unwrap()
+            .replace(" -8 ", " -2 ");
+        with_fixture(fixture.as_bytes(), |input, output| {
+            let cancel = CancelFlag::new();
+            let mut seen = Vec::new();
+            let mut report = |update: ConvertProgress| seen.push(update);
+            let info = convert_file_with(
+                input,
+                output,
+                &ConvertOptions::default(),
+                &cancel,
+                &mut report,
+            )
+            .unwrap();
+            assert_eq!(info.points_written, 40);
+            assert!(
+                seen.iter().any(|p| p.stage == ConvertStage::Loading),
+                "読み込み段階が通知されていません"
+            );
+            let processing: Vec<_> = seen
+                .iter()
+                .filter(|p| p.stage == ConvertStage::Processing)
+                .collect();
+            assert!(!processing.is_empty(), "変換段階が通知されていません");
+            assert!(
+                processing.iter().all(|p| p.points_total == 40),
+                "変換段階の総点数が不正です"
+            );
+            let last = processing.last().unwrap();
+            assert_eq!(last.points_done, 39, "最後の点まで通知されていません");
+            assert!(
+                seen.iter().any(|p| p.stage == ConvertStage::Writing),
+                "書き出し段階が通知されていません"
+            );
+            // 段階内の割合は単調増加し、0.0〜1.0に収まる。
+            let fractions: Vec<f32> = processing.iter().filter_map(|p| p.fraction).collect();
+            assert!(
+                fractions.windows(2).all(|w| w[0] <= w[1]),
+                "割合が逆行しています"
+            );
+            assert!(fractions.iter().all(|f| (0.0..=1.0).contains(f)));
+        });
+    }
+
+    #[test]
+    fn cancelling_before_start_creates_no_output() {
+        with_fixture(&ascii_ply(40), |input, output| {
+            let cancel = CancelFlag::new();
+            cancel.cancel();
+            let error = convert_file_with(
+                input,
+                output,
+                &ConvertOptions::default(),
+                &cancel,
+                &mut |_| {},
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("中止"), "{error}");
+            assert!(!output.exists(), "中止したのに出力が作成されました");
+            assert!(
+                !output.with_extension("json").exists(),
+                "中止したのにJSONが作成されました"
+            );
+        });
+    }
+
+    #[test]
+    fn cancelling_midway_stops_and_creates_no_output() {
+        with_fixture(&ascii_ply(200), |input, output| {
+            let cancel = CancelFlag::new();
+            let worker = cancel.clone();
+            let mut count = 0usize;
+            let mut report = |_update: ConvertProgress| {
+                count += 1;
+                if count == 3 {
+                    worker.cancel();
+                }
+            };
+            let error = convert_file_with(
+                input,
+                output,
+                &ConvertOptions::default(),
+                &cancel,
+                &mut report,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("中止"), "{error}");
+            assert!(!output.exists(), "中止したのに出力が作成されました");
+        });
+    }
+
+    #[test]
+    fn overall_progress_is_monotonic_across_stages() {
+        let loading = ConvertProgress {
+            stage: ConvertStage::Loading,
+            fraction: None,
+            points_done: 0,
+            points_total: 0,
+        };
+        assert_eq!(loading.overall(), None);
+        let processing_start = ConvertProgress {
+            stage: ConvertStage::Processing,
+            fraction: Some(0.0),
+            points_done: 0,
+            points_total: 100,
+        };
+        let processing_end = ConvertProgress {
+            stage: ConvertStage::Processing,
+            fraction: Some(1.0),
+            points_done: 100,
+            points_total: 100,
+        };
+        let writing = ConvertProgress {
+            stage: ConvertStage::Writing,
+            fraction: Some(1.0),
+            points_done: 100,
+            points_total: 100,
+        };
+        let values = [
+            processing_start.overall().unwrap(),
+            processing_end.overall().unwrap(),
+            writing.overall().unwrap(),
+        ];
+        assert!(values.windows(2).all(|w| w[0] <= w[1]), "{values:?}");
+        assert!((values[0] - 0.25).abs() < 1e-6);
+        assert!((values[1] - 0.75).abs() < 1e-6);
+        assert!((values[2] - 1.0).abs() < 1e-6);
     }
 
     #[test]

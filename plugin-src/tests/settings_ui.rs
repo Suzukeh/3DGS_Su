@@ -279,6 +279,19 @@ fn render(context: &egui::Context, app: &mut ConverterApp) -> egui::FullOutput {
     context.run_ui(egui::RawInput::default(), |ui| app.draw(ui))
 }
 
+/// 指定した幅・高さで描画する。狭い画面の確認に使う。
+fn render_sized(
+    context: &egui::Context,
+    app: &mut ConverterApp,
+    size: egui::Vec2,
+) -> egui::FullOutput {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+        ..Default::default()
+    };
+    context.run_ui(input, |ui| app.draw(ui))
+}
+
 fn click(context: &egui::Context, app: &mut ConverterApp, pos: egui::Pos2) {
     for pressed in [true, false] {
         let mut input = egui::RawInput::default();
@@ -664,4 +677,69 @@ fn old_settings_json_still_loads_with_defaults() {
     assert_eq!(settings.convert.max_points, 12_345);
     assert_eq!(settings.convert.keep_sh, ConvertSettings::default().keep_sh);
     assert_eq!(settings.render.size, RenderSettings::default().size);
+}
+
+#[test]
+fn narrow_panel_keeps_path_fields_and_buttons_visible() {
+    // 幅360px は AviUtl2 の既定右ペインより狭い想定。入力欄が全幅になり、
+    // 参照ボタンが次の行へ回っても、すべての操作が描画されることを確認する。
+    let context = egui::Context::default();
+    let mut app = ConverterApp::headless();
+    let output = render_sized(&context, &mut app, egui::vec2(360.0, 700.0));
+    let (text, _) = rendered_text(&output, "入力");
+    for label in [
+        "入力",
+        "出力",
+        "ファイル参照...",
+        "SOGフォルダ...",
+        "保存先...",
+        "品質テンプレート",
+        "変換の詳細設定",
+        "表示設定（選択中の3DGS_Su）",
+    ] {
+        assert!(
+            text.contains(label),
+            "狭い画面で {label} が描画されていません"
+        );
+    }
+}
+
+#[test]
+fn narrow_panel_does_not_draw_controls_outside_the_window() {
+    let context = egui::Context::default();
+    let mut app = ConverterApp::headless();
+    let size = egui::vec2(320.0, 640.0);
+    let output = render_sized(&context, &mut app, size);
+    let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+    let mut outside = Vec::new();
+    collect_outside(&output, bounds, &mut outside);
+    assert!(
+        outside.is_empty(),
+        "画面外へはみ出した描画があります: {:?}",
+        outside.iter().take(5).collect::<Vec<_>>()
+    );
+}
+
+fn collect_outside(output: &egui::FullOutput, bounds: egui::Rect, found: &mut Vec<String>) {
+    fn walk(shape: &egui::Shape, bounds: egui::Rect, found: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(text) => {
+                // 空文字はレイアウト用のダミーなので対象外。
+                if !text.galley.job.text.is_empty()
+                    && !bounds.contains_rect(text.visual_bounding_rect())
+                {
+                    found.push(text.galley.job.text.clone());
+                }
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, bounds, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    for clipped in &output.shapes {
+        walk(&clipped.shape, bounds, found);
+    }
 }
