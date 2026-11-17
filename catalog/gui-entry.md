@@ -71,8 +71,8 @@ https://raw.githubusercontent.com/Suzukeh/3DGS_Su/main/README.md
 
 | 欄 | ファイル | 条件 |
 |---|---|---|
-| サムネイル画像 | `catalog/images/Suzuke.3DGS_Su_thumbnail.png` | 206×206 PNG |
-| 説明画像 | `catalog/images/Suzuke.3DGS_Su_preview.png` | 16:9 PNG |
+| サムネイル画像 | `catalog/images/Suzuke.3DGS_Su_thumbnail.webp` | 206×206 アニメーションWebP |
+| 説明画像 | `catalog/images/Suzuke.3DGS_Su_preview.webp` | 1280×720 アニメーションWebP |
 
 ### インストーラー
 

@@ -28,9 +28,9 @@
   "dependencies": [],
   "images": [
     {
-      "thumbnail": "./image/Suzuke.3DGS_Su_thumbnail.png",
+      "thumbnail": "./image/Suzuke.3DGS_Su_thumbnail.webp",
       "infoImg": [
-        "./image/Suzuke.3DGS_Su_preview.png"
+        "./image/Suzuke.3DGS_Su_preview.webp"
       ]
     }
   ],

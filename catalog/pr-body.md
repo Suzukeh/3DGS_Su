@@ -23,8 +23,8 @@
 - リリース asset `3DGS_Su-v0.5.2.zip` のファイルハッシュを
   `version[].file[].XXH3_128` に設定済み
 - `latest-version` は `v0.5.2`
-- サムネイル: `image/Suzuke.3DGS_Su_thumbnail.png`
-- 説明画像: `image/Suzuke.3DGS_Su_preview.png`
+- サムネイル: `image/Suzuke.3DGS_Su_thumbnail.webp`
+- 説明画像: `image/Suzuke.3DGS_Su_preview.webp`
 
 ## 補足
 

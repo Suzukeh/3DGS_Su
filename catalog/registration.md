@@ -25,11 +25,13 @@ v0.3.3 は新規パッケージの取り込み時に空の `direct` を下地に
 1. GitHub リポジトリ `Suzukeh/3DGS_Su` を公開する
 2. `python build_release.py --version v0.5.2` で `dist/3DGS_Su-v0.5.2.zip` を作る
 3. リリース `v0.5.2` を作り、その zip を添付する
-4. サムネイル `catalog/images/Suzuke.3DGS_Su_thumbnail.png` を用意する（206x206 PNG）
-5. 説明画像 `catalog/images/Suzuke.3DGS_Su_preview.png` を用意する（16:9 PNG）
+4. サムネイル `catalog/images/Suzuke.3DGS_Su_thumbnail.webp` を用意する（206x206 アニメーションWebP）
+5. 説明画像 `catalog/images/Suzuke.3DGS_Su_preview.webp` を用意する（1280x720 アニメーションWebP）
 
-カタログの画像欄は静止画（サムネイル 206x206、説明画像 16:9）のみです。
-ターンテーブル動画は `docs/` に置き、README で参照します。
+画像欄は PNG / JPG / GIF / WebP / SVG / BMP を受け付けます（カタログアプリ v0.3.3 の画像選択ダイアログ）。
+掲載ガイドの表記は「PNG, JPG」ですが、既存カタログではアニメーション GIF / WebP が使われています。
+GIF より色の再現性が高いため、アニメーション WebP（`docs/vanadinite.mp4` から作成、180フレーム・6秒・無限ループ）を使います。
+静止画の `*.png` は予備として残しています。
 
 ## 登録手順（GUI）
 
