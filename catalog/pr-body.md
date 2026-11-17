@@ -1,11 +1,11 @@
-# パッケージ追加: suzuke.3dgs-su
+# パッケージ追加: Suzuke.3DGS_Su
 
 ## 概要
 
 3DGS（3D Gaussian Splatting）の PLY / SOG を AviUtl2 の 3D 空間に表示する
 カスタムオブジェクトと、変換用の汎用プラグインです。
 
-- ID: `suzuke.3dgs-su`
+- ID: `Suzuke.3DGS_Su`
 - リポジトリ: https://github.com/Suzukeh/3DGS_Su
 - リリース: https://github.com/Suzukeh/3DGS_Su/releases/tag/v0.5.2
 - ライセンス: MIT
