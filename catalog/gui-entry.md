@@ -4,16 +4,22 @@ AviUtl2 カタログ本体（v0.3.3 で確認）の **サイドバー → パッ
 
 ## JSON 入力で取り込む（推奨）
 
-登録画面下部の **JSON入力** に、`catalog/Suzuke.3DGS_Su.index.json` の中身を**そのまま**貼り付けます。
+登録画面下部の **JSON入力** に、`catalog/Suzuke.3DGS_Su.gui-import.json` の中身を**そのまま**貼り付けます。
 このダイアログは `index.json` と同じ形式、つまり `id` を持つ要素の**配列** `[ { ... } ]` を受け付けます。
 
 | 貼り付けたもの | 結果 |
 |---|---|
-| `Suzuke.3DGS_Su.index.json`（配列） | OK |
+| `Suzuke.3DGS_Su.gui-import.json`（配列） | OK（ダウンロード元も GitHub になる） |
+| `Suzuke.3DGS_Su.index.json`（配列） | 取り込めるが、ダウンロード元が空の「直接URL」になる |
 | `Suzuke.3DGS_Su.json`（単一オブジェクト `{ ... }`） | `入力形式が不正です。` |
 | `id` を持たない JSON | `上書き対象の要素がありません。` |
 
 取り込み後に各欄を確認し、画像をアップロードしてから **テスト** を実行してください。
+
+`gui-import.json` は `index.json` 版と同じ内容で、`installer.source` に `"direct": null` だけを加えています。
+v0.3.3 は新規パッケージの取り込み時に空の `direct` を下地にして重ねるため、そのままでは
+`github` 指定が捨てられ、ダウンロード元が空の「直接URL」になります。`null` で上書きするとこれを避けられます。
+送信される `index.json` は画面の入力から作り直されるので、`null` は残りません。
 
 ## ID
 
